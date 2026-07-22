@@ -1,6 +1,7 @@
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { AskTimeoutError, BusyPaneError } from './errors.js'
+import { ensureDeliverable, type DeliveryMode } from './delivery.js'
+import { AskTimeoutError } from './errors.js'
 import { looksBusy } from './idle.js'
 import { extractShellOutput, wrapShellCommand } from './sentinel.js'
 import type { AgentKind, AskResult, Backend, Pane } from './types.js'
@@ -25,7 +26,7 @@ export interface ShellAskOptions {
 export interface AgentAskOptions extends ShellAskOptions {
   minWaitMs: number // don't accept idle before this much time has passed
   mailbox: boolean
-  force: boolean
+  mode: DeliveryMode
 }
 
 export const defaultClock: Clock = {
@@ -64,8 +65,11 @@ export async function askAgent(
   nonce: string,
   opts: AgentAskOptions,
 ): Promise<AskResult> {
+  await ensureDeliverable(deps, pane, { kind, command: null }, opts.mode, {
+    timeoutMs: opts.timeoutMs,
+    pollMs: opts.pollMs,
+  })
   const before = await deps.backend.readScreen(pane.id)
-  if (looksBusy(kind, before) && !opts.force) throw new BusyPaneError(pane, before)
 
   let toSend = prompt
   let mailbox: string | null = null

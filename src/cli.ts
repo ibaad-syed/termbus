@@ -6,11 +6,16 @@ const HELP = `termbus — talk between terminal panes (iTerm2)
 Usage:
   termbus list [--json]                    panes: label, occupant, busy state
   termbus check <target> [--lines N]       read a pane's screen
-  termbus send <target> <text> [--raw] [--no-submit] [--force]
-  termbus ask <target> <prompt> [--timeout S] [--mailbox] [--force]
+  termbus send <target> <text> [--raw] [--no-submit] [--queue] [--wait] [--timeout S] [--force]
+  termbus ask <target> <prompt> [--timeout S] [--mailbox] [--queue] [--wait] [--force]
   termbus ask --batch '{"target":"prompt",...}' [--timeout S] [--mailbox]
   termbus whoami                           this pane's identity
   termbus install-skill                    install the Claude Code skill
+
+Busy panes: the default refuses busy agent panes. Pick one of:
+  --queue  deliver now into a busy agent's native input queue (it sees it mid-turn)
+  --wait   poll until the pane is idle, then deliver (also waits out shell commands)
+  --force  interrupt regardless
 
 Targets: session id, label (w1.t2.p1), tty (ttys009), title substring, or "self".
 Never re-send after a timeout — use \`termbus check\` and keep waiting.`

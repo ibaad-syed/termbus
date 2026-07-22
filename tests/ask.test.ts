@@ -69,7 +69,7 @@ describe('askAgent', () => {
   it('waits through busy then returns stable idle screen', async () => {
     const b = fakeBackend([IDLE0, BUSY, BUSY, DONE, DONE, DONE])
     const res = await askAgent(deps(b), PANE, 'claude', 'what is 6*7', NONCE, {
-      timeoutMs: 600_000, pollMs: 1000, minWaitMs: 0, mailbox: false, force: false,
+      timeoutMs: 600_000, pollMs: 1000, minWaitMs: 0, mailbox: false, mode: 'refuse',
     })
     expect(res.response).toContain('Answer: 42')
     expect(b.sent[0].submit).toBe(true)
@@ -79,7 +79,7 @@ describe('askAgent', () => {
     const b = fakeBackend([BUSY])
     await expect(
       askAgent(deps(b), PANE, 'claude', 'hi', NONCE, {
-        timeoutMs: 1000, pollMs: 100, minWaitMs: 0, mailbox: false, force: false,
+        timeoutMs: 1000, pollMs: 100, minWaitMs: 0, mailbox: false, mode: 'refuse',
       }),
     ).rejects.toThrow(BusyPaneError)
     expect(b.sent).toHaveLength(0)
@@ -90,7 +90,7 @@ describe('askAgent', () => {
     const b = fakeBackend([IDLE0, BUSY, BUSY])
     const d = deps(b, files)
     const p = askAgent(d, PANE, 'claude', 'write a poem', NONCE, {
-      timeoutMs: 600_000, pollMs: 1000, minWaitMs: 0, mailbox: true, force: false,
+      timeoutMs: 600_000, pollMs: 1000, minWaitMs: 0, mailbox: true, mode: 'refuse',
     })
     // the sent prompt must include the mailbox path; simulate the agent writing it
     await new Promise((r) => setImmediate(r))

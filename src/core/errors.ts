@@ -26,6 +26,16 @@ export class BusyPaneError extends TermbusError {
   }
 }
 
+export class WaitTimeoutError extends TermbusError {
+  constructor(pane: Pane, waitedMs: number) {
+    super(
+      `waited ${Math.round(waitedMs / 1000)}s for ${pane.label} to go idle but it is still busy — ` +
+        `run \`termbus check ${pane.label}\` to see why, or retry with a longer --timeout`,
+      3,
+    )
+  }
+}
+
 export class AskTimeoutError extends TermbusError {
   constructor(pane: Pane, public readonly screen: string) {
     super(`timed out waiting for ${pane.label} — do NOT re-send; run \`termbus check ${pane.label}\` and wait longer`, 3)

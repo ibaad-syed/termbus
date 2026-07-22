@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 import { detectBackend } from '../backends/detect.js'
 import { askAgent, askShell, defaultClock, type AskDeps } from '../core/ask.js'
+import { resolveMode, waitForIdle, type DeliveryMode } from '../core/delivery.js'
 import { TermbusError } from '../core/errors.js'
 import { occupantForTty } from '../core/occupant.js'
 import { resolveTarget } from '../core/resolve.js'
@@ -27,11 +28,21 @@ async function askPane(
   panes: Pane[],
   target: string,
   prompt: string,
-  opts: { timeoutMs: number; mailbox: boolean; force: boolean },
+  opts: { timeoutMs: number; mailbox: boolean; mode: DeliveryMode },
 ): Promise<AskResult> {
   const pane = resolveTarget(panes, target)
   if (pane.isSelf) throw new TermbusError('refusing to ask self (this pane) — would deadlock')
-  const occ = await occupantForTty(pane.tty)
+  let occ = await occupantForTty(pane.tty)
+  if (occ.kind === 'command' && opts.mode === 'wait') {
+    // a foreground command owns the pane — wait for it to finish, then re-probe
+    await waitForIdle(
+      { ...deps, probeOccupant: () => occupantForTty(pane.tty) },
+      pane,
+      occ,
+      { timeoutMs: opts.timeoutMs, pollMs: 1000 },
+    )
+    occ = await occupantForTty(pane.tty)
+  }
   if (occ.kind === 'shell') {
     return askShell(deps, pane, prompt, nonce(), { timeoutMs: opts.timeoutMs, pollMs: 1000 })
   }
@@ -41,11 +52,11 @@ async function askPane(
       pollMs: 1000,
       minWaitMs: 3000,
       mailbox: opts.mailbox,
-      force: opts.force,
+      mode: opts.mode,
     })
   }
   throw new TermbusError(
-    `pane ${pane.label} is running "${occ.command ?? 'unknown'}" — ask supports shell/claude/codex panes; use \`termbus send --raw\` for other TUIs`,
+    `pane ${pane.label} is running "${occ.command ?? 'unknown'}" — ask supports shell/claude/codex panes (add --wait if a command is still running); use \`termbus send --raw\` for other TUIs`,
   )
 }
 
@@ -56,12 +67,14 @@ export async function cmdAsk(argv: string[]): Promise<void> {
       timeout: { type: 'string' },
       mailbox: { type: 'boolean' },
       force: { type: 'boolean' },
+      queue: { type: 'boolean' },
+      wait: { type: 'boolean' },
       batch: { type: 'string' },
     },
     allowPositionals: true,
   })
   const timeoutMs = (values.timeout ? Number(values.timeout) : 60) * 1000
-  const opts = { timeoutMs, mailbox: Boolean(values.mailbox), force: Boolean(values.force) }
+  const opts = { timeoutMs, mailbox: Boolean(values.mailbox), mode: resolveMode(values) }
   const backend = detectBackend()
   const deps = makeDeps(backend)
   const panes = await backend.listPanes()
@@ -90,7 +103,7 @@ export async function cmdAsk(argv: string[]): Promise<void> {
   const [target, ...promptParts] = positionals
   const prompt = promptParts.join(' ')
   if (!target || !prompt) {
-    throw new TermbusError('usage: termbus ask <target> <prompt> [--timeout S] [--mailbox] [--force] | termbus ask --batch <json>')
+    throw new TermbusError('usage: termbus ask <target> <prompt> [--timeout S] [--mailbox] [--queue] [--wait] [--force] | termbus ask --batch <json>')
   }
   const res = await askPane(deps, panes, target, prompt, opts)
   console.log(res.response)

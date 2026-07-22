@@ -28,9 +28,17 @@ No daemon, no fork of your terminal. termbus drives iTerm2's AppleScript automat
 - macOS + iTerm2 (grant your terminal Automation permission for iTerm2 on first use)
 - Node ≥ 20
 
+## Busy panes
+
+Sending to a busy pane refuses by default. Opt into one of:
+
+- `--queue` — deliver into a busy agent's native input queue (Claude Code and Codex both accept messages typed mid-turn); termbus reports `queued to …` so the sender knows it isn't handled yet
+- `--wait [--timeout S]` — poll until the pane goes idle, then deliver; also waits out a foreground command in a shell pane
+- `--force` — interrupt regardless
+
 ## Safety
 
-- Never interrupts a busy agent (refuses; `--force` to override)
+- Never interrupts a busy agent (refuses; `--queue`/`--wait` to defer, `--force` to override)
 - Never targets its own pane with `send`/`ask`
 - After a timeout it tells the caller to `check`, never to re-send
 
