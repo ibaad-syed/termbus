@@ -4,12 +4,34 @@
   "description": "Let AI agents and humans in different terminal panes see each other, read each other's screens, and exchange prompts — Maestri-style, in the terminal you already use.",
   "type": "module",
   "license": "MIT",
-  "repository": "github:ibaad-syed/termbus",
-  "bin": { "termbus": "./dist/cli.js" },
-  "files": ["dist", "skills", "README.md", "LICENSE"],
-  "engines": { "node": ">=20" },
-  "os": ["darwin"],
-  "keywords": ["iterm2", "claude-code", "codex", "agents", "terminal", "multiplexer", "automation"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ibaad-syed/termbus.git"
+  },
+  "bin": {
+    "termbus": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "darwin"
+  ],
+  "keywords": [
+    "iterm2",
+    "claude-code",
+    "codex",
+    "agents",
+    "terminal",
+    "multiplexer",
+    "automation"
+  ],
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "tsc",
