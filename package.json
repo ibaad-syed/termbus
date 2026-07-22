@@ -12,7 +12,7 @@
   "keywords": ["iterm2", "claude-code", "codex", "agents", "terminal", "multiplexer", "automation"],
   "scripts": {
     "build": "tsc",
-    "prepare": "tsc",
+    "prepublishOnly": "tsc",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
