@@ -8,8 +8,11 @@
   "bin": { "termbus": "./dist/cli.js" },
   "files": ["dist", "skills", "README.md", "LICENSE"],
   "engines": { "node": ">=20" },
+  "os": ["darwin"],
+  "keywords": ["iterm2", "claude-code", "codex", "agents", "terminal", "multiplexer", "automation"],
   "scripts": {
     "build": "tsc",
+    "prepare": "tsc",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
