@@ -1,0 +1,21 @@
+{
+  "name": "termbus",
+  "version": "0.1.0",
+  "description": "Let AI agents and humans in different terminal panes see each other, read each other's screens, and exchange prompts — Maestri-style, in the terminal you already use.",
+  "type": "module",
+  "license": "MIT",
+  "repository": "github:ibaad-syed/termbus",
+  "bin": { "termbus": "./dist/cli.js" },
+  "files": ["dist", "skills", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
