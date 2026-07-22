@@ -1,0 +1,36 @@
+name: release
+# Publishes to npm via Trusted Publishing (OIDC) when a v* tag is pushed.
+# No npm token anywhere: npmjs.com is configured to trust this exact
+# repo + workflow file. Tag with: git tag vX.Y.Z && git push --tags
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write # OIDC credential for npm trusted publishing
+
+jobs:
+  publish:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+          cache: pnpm
+      # trusted publishing requires npm >= 11.5.1
+      - run: npm install -g npm@latest
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: tag must match package.json version
+        run: |
+          pkg="v$(node -p "require('./package.json').version")"
+          [ "$pkg" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != package.json $pkg"; exit 1; }
+      - run: npm publish
