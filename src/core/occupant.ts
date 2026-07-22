@@ -8,6 +8,7 @@ const SHELLS = new Set(['zsh', 'bash', 'fish', 'sh', 'dash', 'tcsh', 'csh', 'ksh
 
 interface PsRow {
   pid: number
+  ppid: number
   stat: string
   command: string
 }
@@ -18,8 +19,16 @@ function parsePs(psOutput: string): PsRow[] {
     .map((l) => l.trim())
     .filter(Boolean)
     .flatMap((line) => {
-      const m = line.match(/^(\d+)\s+\d+\s+(\S+)\s+(.*)$/) ?? line.match(/^(\d+)\s+(\S+)\s+(.*)$/)
-      return m ? [{ pid: Number(m[1]), stat: m[2], command: m[3] }] : []
+      const withPpid = line.match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/)
+      if (withPpid) {
+        return [
+          { pid: Number(withPpid[1]), ppid: Number(withPpid[2]), stat: withPpid[3], command: withPpid[4] },
+        ]
+      }
+      const noPpid = line.match(/^(\d+)\s+(\S+)\s+(.*)$/)
+      return noPpid
+        ? [{ pid: Number(noPpid[1]), ppid: -1, stat: noPpid[2], command: noPpid[3] }]
+        : []
     })
 }
 
@@ -35,9 +44,14 @@ export function classifyPs(psOutput: string): Occupant {
   if (fg.length === 0) return { kind: 'unknown', command: null }
   const nonShell = fg.filter((r) => !SHELLS.has(commandBase(r.command)))
   if (nonShell.length === 0) return { kind: 'shell', command: null }
-  // The direct TUI process (claude/codex/vim) has the lowest pid among its
-  // foreground descendants (mcp servers, node children, etc.)
-  const primary = nonShell.reduce((a, b) => (a.pid < b.pid ? a : b))
+  // The TUI (claude/codex/vim) is launched directly from the pane's shell, so
+  // its ppid is a shell pid; its own children (mcp servers, node helpers) are
+  // parented by the TUI instead. Prefer shell-parented rows to stay correct
+  // under pid wraparound, where a child can hold a lower pid than the TUI.
+  const shellPids = new Set(rows.filter((r) => SHELLS.has(commandBase(r.command))).map((r) => r.pid))
+  const shellParented = nonShell.filter((r) => shellPids.has(r.ppid))
+  const candidates = shellParented.length > 0 ? shellParented : nonShell
+  const primary = candidates.reduce((a, b) => (a.pid < b.pid ? a : b))
   const base = commandBase(primary.command)
   if (base === 'claude') return { kind: 'claude', command: primary.command }
   if (base === 'codex') return { kind: 'codex', command: primary.command }

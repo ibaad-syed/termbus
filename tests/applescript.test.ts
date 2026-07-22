@@ -24,6 +24,14 @@ describe('parseListOutput', () => {
   it('returns [] for empty output', () => {
     expect(parseListOutput('', null)).toEqual([])
   })
+  it('skips truncated garbage records with fewer than 6 fields', () => {
+    const raw =
+      ['1', '1', '1', 'OK-UUID', '/dev/ttys001', 'good pane'].join(FS) + RS +
+      ['1', '1', 'garbage'].join(FS) + RS
+    const panes = parseListOutput(raw, null)
+    expect(panes).toHaveLength(1)
+    expect(panes[0].id).toBe('OK-UUID')
+  })
 })
 
 describe('selfSessionIdFromEnv', () => {

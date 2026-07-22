@@ -45,7 +45,7 @@ describe('askShell', () => {
   it('sends wrapped command and polls until sentinel appears', async () => {
     const b = fakeBackend([
       'user % ls; printf …', // poll 1: no sentinel yet
-      `user % ls; printf 'x' nonce placeholder\nout.txt\n\n__termbus_${NONCE}_0__\nuser %`,
+      `user % printf begin; ls; printf end\n__termbus_${NONCE}_begin__\nout.txt\n\n__termbus_${NONCE}_0__\nuser %`,
     ])
     const res = await askShell(deps(b), PANE, 'ls', NONCE, { timeoutMs: 60_000, pollMs: 1000 })
     expect(b.sent[0].text).toContain(`__termbus_${NONCE}_%s__`)

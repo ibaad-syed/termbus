@@ -1,5 +1,12 @@
+const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * Both markers are emitted by printf with a leading \n, so each lands at
+ * column 0 on its own screen line regardless of how the echoed command
+ * wrapped. Output is everything between them — the echo is never consulted.
+ */
 export function wrapShellCommand(cmd: string, nonce: string): string {
-  return `${cmd}; printf '\\n__termbus_${nonce}_%s__\\n' $?`
+  return `printf '\\n__termbus_${nonce}_begin__\\n'; ${cmd}; printf '\\n__termbus_${nonce}_%s__\\n' $?`
 }
 
 export function extractShellOutput(
@@ -7,27 +14,31 @@ export function extractShellOutput(
   nonce: string,
 ): { output: string; exitCode: number } | null {
   const lines = screen.split('\n')
-  const sentinelRe = new RegExp(`^__termbus_${nonce}_(\\d+)__$`)
-  let sentinelIdx = -1
+  const esc = escapeRegExp(nonce)
+  const endRe = new RegExp(`^__termbus_${esc}_(\\d+)__$`)
+  const beginLine = `__termbus_${nonce}_begin__`
+
+  let endIdx = -1
   let exitCode = 0
   for (let i = lines.length - 1; i >= 0; i--) {
-    const m = lines[i].trim().match(sentinelRe)
+    const m = lines[i].trim().match(endRe)
     if (m) {
-      sentinelIdx = i
+      endIdx = i
       exitCode = Number(m[1])
       break
     }
   }
-  if (sentinelIdx === -1) return null
+  if (endIdx === -1) return null
 
-  // The echoed command line contains both "printf" and the nonce.
-  let cmdIdx = -1
-  for (let i = sentinelIdx - 1; i >= 0; i--) {
-    if (lines[i].includes(nonce) && lines[i].includes('printf')) {
-      cmdIdx = i
+  let beginIdx = -1
+  for (let i = endIdx - 1; i >= 0; i--) {
+    if (lines[i].trim() === beginLine) {
+      beginIdx = i
       break
     }
   }
-  const output = lines.slice(cmdIdx + 1, sentinelIdx).join('\n').trimEnd()
+  // beginIdx === -1: begin marker scrolled off the visible screen (long
+  // output) — return what's visible from the top.
+  const output = lines.slice(beginIdx + 1, endIdx).join('\n').trimEnd()
   return { output, exitCode }
 }

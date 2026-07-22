@@ -48,4 +48,21 @@ describe('looksBusy', () => {
   it('detects idle claude from real captured chrome', () => {
     expect(looksBusy('claude', CLAUDE_IDLE_REAL)).toBe(false)
   })
+  it('ignores a busy marker buried in the transcript when the footer is idle', () => {
+    // The busy phrase appears once, far above the footer; 20 lines of plain
+    // transcript then idle chrome sit between it and the bottom of the screen.
+    const filler = Array.from({ length: 20 }, (_, i) => `● Line ${i}: all done here`)
+    const screen = [
+      '● Earlier I typed "esc to interrupt" into the buffer',
+      ...filler,
+      '╭──────────────────────────────────────╮',
+      '│ >                                    │',
+      '╰──────────────────────────────────────╯',
+      '  ? for shortcuts',
+    ].join('\n')
+    expect(looksBusy('claude', screen)).toBe(false)
+  })
+  it('detects busy claude from a cycled spinner glyph', () => {
+    expect(looksBusy('claude', '✽ Forging… (4s)')).toBe(true)
+  })
 })

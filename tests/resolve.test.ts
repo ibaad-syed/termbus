@@ -27,6 +27,9 @@ describe('resolveTarget', () => {
   it('resolves exact session id', () => {
     expect(resolveTarget(PANES, 'BBB').label).toBe('w1.t1.p2')
   })
+  it('resolves session id case-insensitively', () => {
+    expect(resolveTarget(PANES, 'bbb').label).toBe('w1.t1.p2')
+  })
   it('resolves label case-insensitively', () => {
     expect(resolveTarget(PANES, 'W2.T1.P1').id).toBe('CCC')
   })

@@ -20,6 +20,14 @@ const VIM_PANE = `2001 2000 Ss   login -fp user
 2002 2001 S    -zsh
 2010 2002 S+   vim notes.md`
 
+// PID wraparound: the TUI (claude, pid 99998) has a HIGHER pid than its own
+// node child (pid 150, ppid 99998). Lowest-pid selection would wrongly pick the
+// child; ppid-based selection picks claude because it is parented by the shell.
+const WRAPAROUND_PANE = `100 99   Ss   login -fp user
+200 100  S    -zsh
+99998 200 S+   claude --resume abc
+150 99998 S+   node /Users/x/.bin/mcp-remote https://mcp.linear.app/mcp`
+
 describe('classifyPs', () => {
   it('classifies a claude pane by lowest-pid foreground non-shell process', () => {
     const occ = classifyPs(CLAUDE_PANE)
@@ -39,5 +47,10 @@ describe('classifyPs', () => {
   })
   it('returns unknown for empty ps output', () => {
     expect(classifyPs('').kind).toBe('unknown')
+  })
+  it('classifies the shell-parented TUI even when its pid wrapped above its child', () => {
+    const occ = classifyPs(WRAPAROUND_PANE)
+    expect(occ.kind).toBe('claude')
+    expect(occ.command).toContain('claude --resume')
   })
 })

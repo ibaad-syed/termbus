@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { AppleScriptBackend, selfSessionIdFromEnv } from '../src/backends/applescript.js'
 
-const live = process.env.TERMBUS_LIVE === '1' ? describe : describe.skip
+const live = process.env.TERMBUS_E2E === '1' ? describe : describe.skip
 
 live('AppleScriptBackend (live iTerm2)', () => {
   it('lists real panes and reads a screen', async () => {

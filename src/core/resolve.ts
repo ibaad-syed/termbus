@@ -15,7 +15,7 @@ export function resolveTarget(panes: Pane[], target: string): Pane {
     throw new TargetNotFoundError(t)
   }
 
-  const byId = panes.find((p) => p.id === t)
+  const byId = panes.find((p) => p.id.toLowerCase() === tl)
   if (byId) return byId
 
   const byLabel = panes.find((p) => p.label.toLowerCase() === tl)

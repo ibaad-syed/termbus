@@ -80,16 +80,20 @@ async function osascript(script: string, args: string[]): Promise<string> {
     })
     return stdout.replace(/\n$/, '')
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    if (msg.includes('-1743') || /not allowed|authoriz/i.test(msg)) {
+    const stderr =
+      err && typeof err === 'object' && 'stderr' in err
+        ? String((err as { stderr?: unknown }).stderr ?? '')
+        : ''
+    const detail = stderr.trim() || (err instanceof Error ? err.message : String(err))
+    if (stderr.includes('-1743') || /not allowed|authoriz/i.test(stderr)) {
       throw new TermbusError(
         'macOS blocked automation of iTerm2. Fix: System Settings → Privacy & Security → Automation → allow your terminal to control iTerm2, then retry.',
       )
     }
-    if (msg.includes('session not found')) {
+    if (stderr.includes('session not found')) {
       throw new TermbusError('pane disappeared (session not found) — run `termbus list` again', 2)
     }
-    throw new TermbusError(`osascript failed: ${msg}`)
+    throw new TermbusError(`osascript failed: ${detail}`)
   }
 }
 
@@ -104,8 +108,9 @@ export function parseListOutput(raw: string, selfSessionId: string | null): Pane
   return raw
     .split(RS)
     .filter((rec) => rec.trim().length > 0)
-    .map((rec) => {
-      const parts = rec.split(FS)
+    .map((rec) => rec.split(FS))
+    .filter((parts) => parts.length >= 6)
+    .map((parts) => {
       const [w, t, p, id, tty] = parts
       const title = parts.slice(5).join(FS)
       return {
