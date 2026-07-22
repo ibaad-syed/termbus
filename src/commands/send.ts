@@ -1,14 +1,15 @@
 import { parseArgs } from 'node:util'
 import { detectBackend } from '../backends/detect.js'
 import { defaultClock } from '../core/ask.js'
-import { ensureDeliverable, resolveMode } from '../core/delivery.js'
+import { ensureDeliverable, isAgentKind, resolveMode } from '../core/delivery.js'
+import { buildEnvelope, detectSenderKind, envelopeId } from '../core/envelope.js'
 import { TermbusError } from '../core/errors.js'
 import { occupantForTty } from '../core/occupant.js'
 import { decodeRawEscapes } from '../core/raw.js'
 import { resolveTarget } from '../core/resolve.js'
 
 const USAGE =
-  'usage: termbus send <target> <text> [--raw] [--no-submit] [--queue] [--wait] [--timeout S] [--force]'
+  'usage: termbus send <target> <text> [--raw] [--no-submit] [--queue] [--wait] [--timeout S] [--force] [--plain]'
 
 export async function cmdSend(argv: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
@@ -20,6 +21,7 @@ export async function cmdSend(argv: string[]): Promise<void> {
       wait: { type: 'boolean' },
       timeout: { type: 'string' },
       'no-submit': { type: 'boolean' },
+      plain: { type: 'boolean' },
     },
     allowPositionals: true,
   })
@@ -31,7 +33,8 @@ export async function cmdSend(argv: string[]): Promise<void> {
   const mode = values.raw && !values.queue && !values.wait ? 'force' : resolveMode(values)
   const timeoutMs = (values.timeout ? Number(values.timeout) : 300) * 1000
   const backend = detectBackend()
-  const pane = resolveTarget(await backend.listPanes(), target)
+  const panes = await backend.listPanes()
+  const pane = resolveTarget(panes, target)
   if (pane.isSelf) throw new TermbusError('refusing to send to self (would type into this pane)')
 
   const occ = await occupantForTty(pane.tty)
@@ -43,8 +46,15 @@ export async function cmdSend(argv: string[]): Promise<void> {
     { timeoutMs, pollMs: 1000 },
   )
 
-  const payload = values.raw ? decodeRawEscapes(text) : text
+  let payload = values.raw ? decodeRawEscapes(text) : text
   const submit = values.raw ? false : !values['no-submit']
+  // Sender envelope: only for submitted prompts to agent panes. Raw keystrokes,
+  // incremental --no-submit composition, shell targets, and --plain stay
+  // byte-for-byte untouched.
+  if (isAgentKind(occ.kind) && submit && !values.raw && !values.plain) {
+    const selfLabel = panes.find((p) => p.isSelf)?.label ?? 'external'
+    payload = `${buildEnvelope({ label: selfLabel, kind: await detectSenderKind() }, envelopeId())} ${payload}`
+  }
   await backend.sendText(pane.id, payload, submit)
 
   if (outcome === 'queued') {

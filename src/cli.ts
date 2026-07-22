@@ -6,8 +6,8 @@ const HELP = `termbus — talk between terminal panes (iTerm2)
 Usage:
   termbus list [--json]                    panes: label, occupant, busy state
   termbus check <target> [--lines N]       read a pane's screen
-  termbus send <target> <text> [--raw] [--no-submit] [--queue] [--wait] [--timeout S] [--force]
-  termbus ask <target> <prompt> [--timeout S] [--mailbox] [--queue] [--wait] [--force]
+  termbus send <target> <text> [--raw] [--no-submit] [--queue] [--wait] [--timeout S] [--force] [--plain]
+  termbus ask <target> <prompt> [--timeout S] [--mailbox] [--queue] [--wait] [--force] [--plain]
   termbus ask --batch '{"target":"prompt",...}' [--timeout S] [--mailbox]
   termbus watch [target ...] [--interval S] [--notify] [--push <target>]
   termbus whoami                           this pane's identity

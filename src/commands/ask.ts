@@ -5,6 +5,7 @@ import { parseArgs } from 'node:util'
 import { detectBackend } from '../backends/detect.js'
 import { askAgent, askShell, defaultClock, type AskDeps, type PermissionPolicy } from '../core/ask.js'
 import { resolveMode, waitForIdle, type DeliveryMode } from '../core/delivery.js'
+import { buildEnvelope, detectSenderKind, envelopeId, type Sender } from '../core/envelope.js'
 import { TermbusError } from '../core/errors.js'
 import { occupantForTty } from '../core/occupant.js'
 import { resolveTarget } from '../core/resolve.js'
@@ -28,7 +29,13 @@ async function askPane(
   panes: Pane[],
   target: string,
   prompt: string,
-  opts: { timeoutMs: number; mailbox: boolean; mode: DeliveryMode; onPermission: PermissionPolicy },
+  opts: {
+    timeoutMs: number
+    mailbox: boolean
+    mode: DeliveryMode
+    onPermission: PermissionPolicy
+    sender: Sender | null // null = --plain, no attribution envelope
+  },
 ): Promise<AskResult> {
   const pane = resolveTarget(panes, target)
   if (pane.isSelf) throw new TermbusError('refusing to ask self (this pane) — would deadlock')
@@ -47,6 +54,8 @@ async function askPane(
     return askShell(deps, pane, prompt, nonce(), { timeoutMs: opts.timeoutMs, pollMs: 1000 })
   }
   if (occ.kind === 'claude' || occ.kind === 'codex') {
+    // envelope goes in front; askAgent appends the mailbox transport trailer
+    if (opts.sender) prompt = `${buildEnvelope(opts.sender, envelopeId())} ${prompt}`
     return askAgent(deps, pane, occ.kind as AgentKind, prompt, nonce(), {
       timeoutMs: opts.timeoutMs,
       pollMs: 1000,
@@ -71,6 +80,7 @@ export async function cmdAsk(argv: string[]): Promise<void> {
       queue: { type: 'boolean' },
       wait: { type: 'boolean' },
       'on-permission': { type: 'string' },
+      plain: { type: 'boolean' },
       batch: { type: 'string' },
     },
     allowPositionals: true,
@@ -80,10 +90,13 @@ export async function cmdAsk(argv: string[]): Promise<void> {
   if (!['return', 'approve', 'fail'].includes(onPermission)) {
     throw new TermbusError(`--on-permission must be return, approve, or fail (got "${onPermission}")`)
   }
-  const opts = { timeoutMs, mailbox: Boolean(values.mailbox), mode: resolveMode(values), onPermission }
   const backend = detectBackend()
   const deps = makeDeps(backend)
   const panes = await backend.listPanes()
+  const sender: Sender | null = values.plain
+    ? null
+    : { label: panes.find((p) => p.isSelf)?.label ?? 'external', kind: await detectSenderKind() }
+  const opts = { timeoutMs, mailbox: Boolean(values.mailbox), mode: resolveMode(values), onPermission, sender }
 
   if (values.batch) {
     let map: Record<string, string>
