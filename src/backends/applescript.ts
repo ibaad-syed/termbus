@@ -59,7 +59,13 @@ on run argv
         repeat with s in sessions of t
           if (id of s) is target then
             if doSubmit is "1" then
-              tell s to write text payload
+              -- Two separate writes: agent TUIs (claude/codex) treat a chunk that
+              -- arrives with its trailing CR as a paste, so the CR becomes a line
+              -- break in the composer instead of Enter. A standalone CR after a
+              -- short delay registers as a real keypress.
+              tell s to write text payload newline NO
+              delay 0.2
+              tell s to write text ""
             else
               tell s to write text payload newline NO
             end if
@@ -85,6 +91,11 @@ async function osascript(script: string, args: string[]): Promise<string> {
         ? String((err as { stderr?: unknown }).stderr ?? '')
         : ''
     const detail = stderr.trim() || (err instanceof Error ? err.message : String(err))
+    if (stderr.includes('-1728') || /can.t get application|application .*(isn.t|not) running|-600/i.test(stderr)) {
+      throw new TermbusError(
+        'iTerm2 is not available. termbus needs iTerm2 installed (and running) on macOS — install from https://iterm2.com, then retry.',
+      )
+    }
     if (stderr.includes('-1743') || /not allowed|authoriz/i.test(stderr)) {
       throw new TermbusError(
         'macOS blocked automation of iTerm2. Fix: System Settings → Privacy & Security → Automation → allow your terminal to control iTerm2, then retry.',
