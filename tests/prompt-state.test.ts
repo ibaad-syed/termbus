@@ -81,3 +81,19 @@ describe('diffStates', () => {
     ])
   })
 })
+
+describe('codex trust dialog (live-captured, › selector)', () => {
+  const CODEX_TRUST = [
+    '  Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of',
+    '  prompt injection. Trusting the directory allows project-local config, hooks, and exec policies to load.',
+    '',
+    '› 1. Yes, continue',
+    '  2. No, quit',
+    '',
+    '  Press enter to continue',
+  ].join('\n')
+
+  it('detects the › selector codex actually renders', () => {
+    expect(agentScreenState('codex', CODEX_TRUST)).toBe('awaiting-input')
+  })
+})

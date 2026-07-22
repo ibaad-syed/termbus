@@ -26,8 +26,10 @@ export function looksBusy(kind: AgentKind, screen: string): boolean {
  * extension contract as BUSY_MARKERS: new agent/dialog = a regex + a fixture.
  */
 const PROMPT_MARKERS: Record<AgentKind, RegExp[]> = {
-  claude: [/❯\s*\d+\.\s/, /enter to confirm/i, /do you want to (proceed|make|create|allow)/i],
-  codex: [/❯\s*\d+\.\s/, /press enter to confirm/i, /would you like to (make|proceed|run|approve)/i],
+  claude: [/[❯›]\s*\d+\.\s/, /enter to confirm/i, /do you want to (proceed|make|create|allow)/i],
+  // codex renders its selector as › (single right angle), not ❯ — seen live on
+  // its trust-directory dialog, which also says "Press enter to continue"
+  codex: [/[❯›]\s*\d+\.\s/, /press enter to (confirm|continue)/i, /would you like to (make|proceed|run|approve)/i, /do you trust/i],
 }
 
 export type AgentScreenState = 'idle' | 'busy' | 'awaiting-input'
