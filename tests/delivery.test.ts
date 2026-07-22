@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ensureDeliverable, paneBusy, resolveMode, waitForIdle, type DeliveryDeps } from '../src/core/delivery.js'
-import { BusyPaneError, TermbusError, WaitTimeoutError } from '../src/core/errors.js'
+import { AwaitingInputError, BusyPaneError, TermbusError, WaitTimeoutError } from '../src/core/errors.js'
 import type { Backend, Occupant, Pane } from '../src/core/types.js'
 
 const PANE: Pane = {
@@ -138,5 +138,30 @@ describe('waitForIdle', () => {
     }).catch((e) => e)
     expect(err).toBeInstanceOf(TermbusError)
     expect(err.exitCode).toBe(3)
+  })
+})
+
+describe('awaiting-input handling', () => {
+  const opts = { timeoutMs: 10_000, pollMs: 1000 }
+  const PROMPT_SCREEN = 'Do you want to proceed?\n❯ 1. Yes\n  2. No, and tell Claude what to do differently (esc)'
+
+  it('refuse and queue both stop at a modal dialog', async () => {
+    await expect(
+      ensureDeliverable(deps(fakeBackend([PROMPT_SCREEN])), PANE, claude(), 'refuse', opts),
+    ).rejects.toThrow(AwaitingInputError)
+    await expect(
+      ensureDeliverable(deps(fakeBackend([PROMPT_SCREEN])), PANE, claude(), 'queue', opts),
+    ).rejects.toThrow(AwaitingInputError)
+  })
+
+  it('wait polls through the dialog once someone answers it', async () => {
+    const b = fakeBackend([PROMPT_SCREEN, PROMPT_SCREEN, BUSY_SCREEN, IDLE_SCREEN])
+    const r = await ensureDeliverable(deps(b), PANE, claude(), 'wait', opts)
+    expect(r.outcome).toBe('idle')
+  })
+
+  it('force ignores the dialog', async () => {
+    const r = await ensureDeliverable(deps(fakeBackend([PROMPT_SCREEN])), PANE, claude(), 'force', opts)
+    expect(r.outcome).toBe('idle')
   })
 })

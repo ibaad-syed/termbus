@@ -10,7 +10,7 @@ You are running inside an iTerm2 pane. Other panes (in this tab, other tabs, oth
 
 ## Commands
 
-- `termbus list` — all panes: label (`w1.t2.p1`), occupant (claude/codex/shell/command), busy/idle, title. **Always run this first** to get exact targets.
+- `termbus list` — all panes: label (`w1.t2.p1`), occupant (claude/codex/shell/command), state (idle/busy/`input!`), title. **Always run this first** to get exact targets.
 - `termbus check <target> [--lines N]` — read a pane's current screen without touching it. Use for passive observation (build output, logs, another agent's progress).
 - `termbus ask <target> "prompt"` — send a prompt/command and wait for the response. Works on shell panes (returns output + exit code) and agent panes (returns their final screen).
 - `termbus ask <target> "prompt" --mailbox` — for agent panes: the agent writes its full answer to a temp file. **Prefer this for any answer longer than a few lines** — screens truncate.
@@ -20,6 +20,14 @@ You are running inside an iTerm2 pane. Other panes (in this tab, other tabs, oth
 - `termbus send <target> "text" --wait [--timeout S]` — block until the pane is idle, then deliver. Also works on shell panes running a command (waits for the command to finish). Default wait budget 300s.
 - `termbus send <target> --raw "2\r"` — raw input for TUIs/menus. Escapes: `\r` Enter (TUIs need `\r`, not `\n`), `\t` Tab, `\e` ESC, `\x03` Ctrl-C, `\e[A` up arrow.
 - `termbus whoami` — identify your own pane.
+- `termbus watch [target ...] [--interval S] [--notify] [--push <pane>]` — long-running monitor (give it its own pane). Prints state transitions; when a watched agent stops at a permission prompt it can fire a macOS notification and/or queue a heads-up message to a supervisor pane.
+
+## Permission prompts (awaiting-input)
+
+Agents stop at modal dialogs (tool permission, trust-folder, pickers). `list` shows these as STATE `input!`. Handling:
+- `ask` detects them mid-task and returns early (exit code 5) with the prompt screen and exact keys to answer it — read the dialog, then approve with `termbus send <target> --raw '\r'` or reject with `--raw '\e'`, then keep waiting via `check`/`ask`.
+- `ask --on-permission approve` auto-presses Enter on each dialog so trusted tasks run unattended (capped at 25 approvals). This bypasses the target's safety gate — only use it when the user has okayed it or the task is clearly safe.
+- Plain `send`/`--queue` refuse a pane that is awaiting input (typing text into a dialog would be stray keystrokes). Answer the dialog first, or use `--wait`.
 
 Targets: label, session id, tty, unique title substring, all shown by `list`.
 

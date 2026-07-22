@@ -19,3 +19,26 @@ export function looksBusy(kind: AgentKind, screen: string): boolean {
   const tail = screen.split('\n').slice(-FOOTER_LINES).join('\n')
   return BUSY_MARKERS[kind].some((re) => re.test(tail))
 }
+
+/**
+ * Markers for modal dialogs that block the agent until a human (or another
+ * agent) answers: permission prompts, trust-folder dialogs, pickers. Same
+ * extension contract as BUSY_MARKERS: new agent/dialog = a regex + a fixture.
+ */
+const PROMPT_MARKERS: Record<AgentKind, RegExp[]> = {
+  claude: [/❯\s*\d+\.\s/, /enter to confirm/i, /do you want to (proceed|make|create|allow)/i],
+  codex: [/❯\s*\d+\.\s/, /press enter to confirm/i, /would you like to (make|proceed|run|approve)/i],
+}
+
+export type AgentScreenState = 'idle' | 'busy' | 'awaiting-input'
+
+/**
+ * Busy wins over prompt markers: while streaming, a transcript can echo
+ * dialog-like text, but real dialogs only appear when the agent has stopped.
+ */
+export function agentScreenState(kind: AgentKind, screen: string): AgentScreenState {
+  if (looksBusy(kind, screen)) return 'busy'
+  const tail = screen.split('\n').slice(-FOOTER_LINES).join('\n')
+  if (PROMPT_MARKERS[kind].some((re) => re.test(tail))) return 'awaiting-input'
+  return 'idle'
+}

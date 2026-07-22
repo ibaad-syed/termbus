@@ -29,4 +29,6 @@ export interface AskResult {
   response: string
   exitCode?: number // shell asks only
   screen: string    // final screen capture
+  /** set when the ask stopped early because the agent hit a modal prompt */
+  status?: 'awaiting-input'
 }

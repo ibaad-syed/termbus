@@ -9,6 +9,7 @@ Usage:
   termbus send <target> <text> [--raw] [--no-submit] [--queue] [--wait] [--timeout S] [--force]
   termbus ask <target> <prompt> [--timeout S] [--mailbox] [--queue] [--wait] [--force]
   termbus ask --batch '{"target":"prompt",...}' [--timeout S] [--mailbox]
+  termbus watch [target ...] [--interval S] [--notify] [--push <target>]
   termbus whoami                           this pane's identity
   termbus install-skill                    install the Claude Code skill
 
@@ -16,6 +17,12 @@ Busy panes: the default refuses busy agent panes. Pick one of:
   --queue  deliver now into a busy agent's native input queue (it sees it mid-turn)
   --wait   poll until the pane is idle, then deliver (also waits out shell commands)
   --force  interrupt regardless
+
+Permission prompts: agents stopped at a dialog show STATE "input!" in list.
+ask surfaces them (exit 5) with instructions; --on-permission approve|return|fail
+sets the policy (approve presses Enter for you — opt-in, use with care).
+watch alerts when a pane needs attention (--notify macOS banner, --push <pane>
+queues a heads-up message to a supervisor pane).
 
 Targets: session id, label (w1.t2.p1), tty (ttys009), title substring, or "self".
 Never re-send after a timeout — use \`termbus check\` and keep waiting.`
@@ -29,6 +36,8 @@ async function main(): Promise<void> {
       return (await import('./commands/check.js')).cmdCheck(rest)
     case 'send':
       return (await import('./commands/send.js')).cmdSend(rest)
+    case 'watch':
+      return (await import('./commands/watch.js')).cmdWatch(rest)
     case 'ask':
       return (await import('./commands/ask.js')).cmdAsk(rest)
     case 'whoami':

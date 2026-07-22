@@ -26,7 +26,9 @@ export async function cmdSend(argv: string[]): Promise<void> {
   const [target, ...textParts] = positionals
   const text = textParts.join(' ')
   if (!target || !text) throw new TermbusError(USAGE)
-  const mode = resolveMode(values)
+  // --raw is deliberate TUI keystroke driving (answering dialogs, menus) —
+  // gating it on busy/awaiting-input would block its main use case.
+  const mode = values.raw && !values.queue && !values.wait ? 'force' : resolveMode(values)
   const timeoutMs = (values.timeout ? Number(values.timeout) : 300) * 1000
   const backend = detectBackend()
   const pane = resolveTarget(await backend.listPanes(), target)

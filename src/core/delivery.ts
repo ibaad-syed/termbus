@@ -1,5 +1,5 @@
-import { BusyPaneError, TermbusError, WaitTimeoutError } from './errors.js'
-import { looksBusy } from './idle.js'
+import { AwaitingInputError, BusyPaneError, TermbusError, WaitTimeoutError } from './errors.js'
+import { agentScreenState, type AgentScreenState } from './idle.js'
 import type { AgentKind, Backend, Occupant, Pane } from './types.js'
 
 export type DeliveryMode = 'refuse' | 'queue' | 'wait' | 'force'
@@ -22,14 +22,18 @@ export function isAgentKind(kind: Occupant['kind']): kind is AgentKind {
 }
 
 /**
- * Busy means "delivering now would collide with something": an agent mid-turn,
- * or a foreground program (sleep, build, dev server) owning the tty. An idle
- * shell prompt is not busy; unknown panes are treated as idle so the default
- * permissive path keeps working.
+ * Pane-level state: agents report idle/busy/awaiting-input from their screen;
+ * a foreground program (sleep, build, dev server) owning a shell's tty is
+ * busy. An idle shell prompt is not busy; unknown panes are treated as idle
+ * so the default permissive path keeps working.
  */
+export function paneState(occ: Occupant, screen: string): AgentScreenState {
+  if (isAgentKind(occ.kind)) return agentScreenState(occ.kind, screen)
+  return occ.kind === 'command' ? 'busy' : 'idle'
+}
+
 export function paneBusy(occ: Occupant, screen: string): boolean {
-  if (isAgentKind(occ.kind)) return looksBusy(occ.kind, screen)
-  return occ.kind === 'command'
+  return paneState(occ, screen) !== 'idle'
 }
 
 export interface DeliveryDeps {
@@ -88,7 +92,13 @@ export async function ensureDeliverable(
   if (mode === 'refuse' && !isAgentKind(occ.kind)) return { outcome: 'idle', waitedMs: 0 }
 
   const screen = await deps.backend.readScreen(pane.id)
-  if (!paneBusy(occ, screen)) return { outcome: 'idle', waitedMs: 0 }
+  const state = paneState(occ, screen)
+  if (state === 'idle') return { outcome: 'idle', waitedMs: 0 }
+
+  // A modal dialog has no composer: text typed "into" it becomes stray
+  // keystrokes, and there is no native queue behind it. Only --wait (someone
+  // else may answer the prompt) or --force get past this.
+  if (state === 'awaiting-input' && mode !== 'wait') throw new AwaitingInputError(pane, screen)
 
   switch (mode) {
     case 'refuse':

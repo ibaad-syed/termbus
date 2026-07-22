@@ -36,6 +36,10 @@ Sending to a busy pane refuses by default. Opt into one of:
 - `--wait [--timeout S]` — poll until the pane goes idle, then deliver; also waits out a foreground command in a shell pane
 - `--force` — interrupt regardless
 
+## Permission prompts
+
+Agents block on modal dialogs (tool permissions, trust prompts). termbus detects these: `list` shows the pane as `input!`, and `ask` returns early (exit 5) with the dialog on screen and the exact keys to answer it (`send <target> --raw '\r'` approve / `--raw '\e'` reject). `ask --on-permission approve` auto-confirms dialogs for trusted unattended tasks (capped, opt-in). `termbus watch` is a long-running monitor for this: run it in its own pane and it reports state transitions, fires a macOS notification (`--notify`), or queues a heads-up to a supervisor pane (`--push <pane>`) whenever a watched agent stops at a prompt.
+
 ## Safety
 
 - Never interrupts a busy agent (refuses; `--queue`/`--wait` to defer, `--force` to override)
@@ -44,7 +48,7 @@ Sending to a busy pane refuses by default. Opt into one of:
 
 ## Roadmap
 
-tmux backend (SSH + iTerm tmux -CC), kitty & WezTerm backends, iTerm Python API backend (push output subscriptions), `termbus watch`.
+tmux backend (SSH + iTerm tmux -CC), kitty & WezTerm backends, iTerm Python API backend (push output subscriptions), hook-based event feed (Claude Code `Notification` hook / Codex `notify` instead of screen polling), subscribe/unsubscribe pub-sub routing on top of `watch`.
 
 Backends implement a 3-method interface (`listPanes/readScreen/sendText`) — contributions welcome.
 

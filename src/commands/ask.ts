@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 import { detectBackend } from '../backends/detect.js'
-import { askAgent, askShell, defaultClock, type AskDeps } from '../core/ask.js'
+import { askAgent, askShell, defaultClock, type AskDeps, type PermissionPolicy } from '../core/ask.js'
 import { resolveMode, waitForIdle, type DeliveryMode } from '../core/delivery.js'
 import { TermbusError } from '../core/errors.js'
 import { occupantForTty } from '../core/occupant.js'
@@ -28,7 +28,7 @@ async function askPane(
   panes: Pane[],
   target: string,
   prompt: string,
-  opts: { timeoutMs: number; mailbox: boolean; mode: DeliveryMode },
+  opts: { timeoutMs: number; mailbox: boolean; mode: DeliveryMode; onPermission: PermissionPolicy },
 ): Promise<AskResult> {
   const pane = resolveTarget(panes, target)
   if (pane.isSelf) throw new TermbusError('refusing to ask self (this pane) — would deadlock')
@@ -53,6 +53,7 @@ async function askPane(
       minWaitMs: 3000,
       mailbox: opts.mailbox,
       mode: opts.mode,
+      onPermission: opts.onPermission,
     })
   }
   throw new TermbusError(
@@ -69,12 +70,17 @@ export async function cmdAsk(argv: string[]): Promise<void> {
       force: { type: 'boolean' },
       queue: { type: 'boolean' },
       wait: { type: 'boolean' },
+      'on-permission': { type: 'string' },
       batch: { type: 'string' },
     },
     allowPositionals: true,
   })
   const timeoutMs = (values.timeout ? Number(values.timeout) : 60) * 1000
-  const opts = { timeoutMs, mailbox: Boolean(values.mailbox), mode: resolveMode(values) }
+  const onPermission = (values['on-permission'] ?? 'return') as PermissionPolicy
+  if (!['return', 'approve', 'fail'].includes(onPermission)) {
+    throw new TermbusError(`--on-permission must be return, approve, or fail (got "${onPermission}")`)
+  }
+  const opts = { timeoutMs, mailbox: Boolean(values.mailbox), mode: resolveMode(values), onPermission }
   const backend = detectBackend()
   const deps = makeDeps(backend)
   const panes = await backend.listPanes()
@@ -90,7 +96,7 @@ export async function cmdAsk(argv: string[]): Promise<void> {
       Object.entries(map).map(async ([name, prompt]) => {
         try {
           const r = await askPane(deps, panes, name, prompt, opts)
-          return { name, output: r.response, exitCode: r.exitCode }
+          return { name, output: r.response, exitCode: r.exitCode, status: r.status }
         } catch (err) {
           return { name, error: err instanceof Error ? err.message : String(err) }
         }
@@ -106,6 +112,17 @@ export async function cmdAsk(argv: string[]): Promise<void> {
     throw new TermbusError('usage: termbus ask <target> <prompt> [--timeout S] [--mailbox] [--queue] [--wait] [--force] | termbus ask --batch <json>')
   }
   const res = await askPane(deps, panes, target, prompt, opts)
+  if (res.status === 'awaiting-input') {
+    const pane = resolveTarget(panes, target)
+    console.log(res.screen)
+    console.error(
+      `[awaiting-input] ${pane.label} stopped at a prompt (screen above). ` +
+        `Approve: \`termbus send ${pane.label} --raw '\\r'\` · reject: \`termbus send ${pane.label} --raw '\\e'\` · ` +
+        `then re-check with \`termbus check ${pane.label}\`. Or re-run ask with --on-permission approve.`,
+    )
+    process.exitCode = 5
+    return
+  }
   console.log(res.response)
   if (res.kind === 'shell' && res.exitCode !== 0) {
     console.error(`[exit ${res.exitCode}]`)

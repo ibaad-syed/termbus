@@ -26,6 +26,17 @@ export class BusyPaneError extends TermbusError {
   }
 }
 
+export class AwaitingInputError extends TermbusError {
+  constructor(pane: Pane, public readonly screen: string) {
+    super(
+      `pane ${pane.label} (${pane.title}) is stopped at a prompt awaiting input — ` +
+        `see it: \`termbus check ${pane.label}\`; approve: \`termbus send ${pane.label} --raw '\\r'\`; ` +
+        `reject: \`termbus send ${pane.label} --raw '\\e'\``,
+      5,
+    )
+  }
+}
+
 export class WaitTimeoutError extends TermbusError {
   constructor(pane: Pane, waitedMs: number) {
     super(

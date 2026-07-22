@@ -69,7 +69,7 @@ describe('askAgent', () => {
   it('waits through busy then returns stable idle screen', async () => {
     const b = fakeBackend([IDLE0, BUSY, BUSY, DONE, DONE, DONE])
     const res = await askAgent(deps(b), PANE, 'claude', 'what is 6*7', NONCE, {
-      timeoutMs: 600_000, pollMs: 1000, minWaitMs: 0, mailbox: false, mode: 'refuse',
+      timeoutMs: 600_000, pollMs: 1000, minWaitMs: 0, mailbox: false, mode: 'refuse', onPermission: 'return',
     })
     expect(res.response).toContain('Answer: 42')
     expect(b.sent[0].submit).toBe(true)
@@ -79,7 +79,7 @@ describe('askAgent', () => {
     const b = fakeBackend([BUSY])
     await expect(
       askAgent(deps(b), PANE, 'claude', 'hi', NONCE, {
-        timeoutMs: 1000, pollMs: 100, minWaitMs: 0, mailbox: false, mode: 'refuse',
+        timeoutMs: 1000, pollMs: 100, minWaitMs: 0, mailbox: false, mode: 'refuse', onPermission: 'return',
       }),
     ).rejects.toThrow(BusyPaneError)
     expect(b.sent).toHaveLength(0)
@@ -90,7 +90,7 @@ describe('askAgent', () => {
     const b = fakeBackend([IDLE0, BUSY, BUSY])
     const d = deps(b, files)
     const p = askAgent(d, PANE, 'claude', 'write a poem', NONCE, {
-      timeoutMs: 600_000, pollMs: 1000, minWaitMs: 0, mailbox: true, mode: 'refuse',
+      timeoutMs: 600_000, pollMs: 1000, minWaitMs: 0, mailbox: true, mode: 'refuse', onPermission: 'return',
     })
     // the sent prompt must include the mailbox path; simulate the agent writing it
     await new Promise((r) => setImmediate(r))
@@ -98,5 +98,40 @@ describe('askAgent', () => {
     files[path] = 'full answer here'
     const res = await p
     expect(res.response).toBe('full answer here')
+  })
+})
+
+describe('askAgent permission policies', () => {
+  const IDLE = '╭─╮\n│ > │\n╰─╯ ? for shortcuts'
+  const BUSY = 'Thinking… esc to interrupt'
+  const PROMPT = 'Do you want to proceed?\n❯ 1. Yes\n  2. No (esc)'
+  const DONE = '● Done: task finished\n╭─╮\n│ > │\n╰─╯ ? for shortcuts'
+  const base = { timeoutMs: 600_000, pollMs: 1000, minWaitMs: 0, mailbox: false, mode: 'refuse' } as const
+
+  it('return (default): surfaces the prompt with awaiting-input status', async () => {
+    const b = fakeBackend([IDLE, IDLE, BUSY, PROMPT])
+    const res = await askAgent(deps(b), PANE, 'claude', 'do a thing', NONCE, {
+      ...base, onPermission: 'return',
+    })
+    expect(res.status).toBe('awaiting-input')
+    expect(res.screen).toContain('Do you want to proceed?')
+  })
+
+  it('approve: presses Enter and keeps waiting for the real answer', async () => {
+    const b = fakeBackend([IDLE, IDLE, BUSY, PROMPT, BUSY, DONE, DONE, DONE])
+    const res = await askAgent(deps(b), PANE, 'claude', 'do a thing', NONCE, {
+      ...base, onPermission: 'approve',
+    })
+    expect(res.status).toBeUndefined()
+    expect(res.response).toContain('task finished')
+    // first send is the prompt text, second is the bare Enter for the dialog
+    expect(b.sent[1]).toEqual({ text: '\r', submit: false })
+  })
+
+  it('fail: throws AwaitingInputError at the dialog', async () => {
+    const b = fakeBackend([IDLE, IDLE, BUSY, PROMPT])
+    await expect(
+      askAgent(deps(b), PANE, 'claude', 'do a thing', NONCE, { ...base, onPermission: 'fail' }),
+    ).rejects.toThrow(/awaiting input/)
   })
 })
