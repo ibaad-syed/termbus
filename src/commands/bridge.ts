@@ -13,7 +13,8 @@ const USAGE =
   'usage: termbus bridge --relay <url> --secret <s> [--interval S]\n' +
   'Connects this Mac to a termbus-hq deployment (outbound only). Runs until Ctrl-C.'
 
-const FOOTER_LINES = 15
+const FOOTER_LINES = 15 // prompt fingerprints stay footer-scoped
+const PEEK_LINES = 60 // terminal view in HQ
 
 export function promptFingerprint(screen: string): string {
   const tail = screen.split('\n').slice(-FOOTER_LINES).join('\n').trim()
@@ -57,7 +58,7 @@ async function snapshotPanes(backend: Backend): Promise<Array<WatchSnapshot & { 
       }
       // agent panes ship a footer preview so HQ can render a quick peek;
       // shells/commands never leak screen content
-      if (isAgentKind(occ.kind)) snap.screen = screen.split('\n').slice(-FOOTER_LINES).join('\n')
+      if (isAgentKind(occ.kind)) snap.screen = screen.split('\n').slice(-PEEK_LINES).join('\n')
       out.push(snap)
     } catch {
       // pane closed mid-scan
