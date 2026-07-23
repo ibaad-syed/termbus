@@ -10,6 +10,7 @@ Usage:
   termbus ask <target> <prompt> [--timeout S] [--mailbox] [--queue] [--wait] [--force] [--plain]
   termbus ask --batch '{"target":"prompt",...}' [--timeout S] [--mailbox]
   termbus watch [target ...] [--interval S] [--notify] [--push <target>]
+  termbus bridge --relay <url> --secret <s>  connect this Mac to termbus-hq
   termbus whoami                           this pane's identity
   termbus install-skill                    install the Claude Code skill
 
@@ -38,6 +39,8 @@ async function main(): Promise<void> {
       return (await import('./commands/send.js')).cmdSend(rest)
     case 'watch':
       return (await import('./commands/watch.js')).cmdWatch(rest)
+    case 'bridge':
+      return (await import('./commands/bridge.js')).cmdBridge(rest)
     case 'ask':
       return (await import('./commands/ask.js')).cmdAsk(rest)
     case 'whoami':
