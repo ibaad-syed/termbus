@@ -55,8 +55,9 @@ async function snapshotPanes(backend: Backend): Promise<Array<WatchSnapshot & { 
         state,
         occupant: occ.kind,
       }
-      // screen content only leaves the Mac for panes that need attention
-      if (state === 'awaiting-input') snap.screen = screen.split('\n').slice(-FOOTER_LINES).join('\n')
+      // agent panes ship a footer preview so HQ can render a quick peek;
+      // shells/commands never leak screen content
+      if (isAgentKind(occ.kind)) snap.screen = screen.split('\n').slice(-FOOTER_LINES).join('\n')
       out.push(snap)
     } catch {
       // pane closed mid-scan
@@ -122,12 +123,14 @@ export async function cmdBridge(argv: string[]): Promise<void> {
   if (relay.startsWith('http://') && !/^http:\/\/(localhost|127\.0\.0\.1)([:/]|$)/.test(relay)) {
     throw new TermbusError('refusing plain http to a non-local relay — the bridge secret would travel unencrypted')
   }
-  const intervalMs = (values.interval ? Number(values.interval) : 2) * 1000
+  const intervalMs = (values.interval ? Number(values.interval) : 1) * 1000
   const backend = detectBackend()
 
   console.log(`bridge → ${relay} (Ctrl-C to stop)`)
   let prev = new Map<string, WatchSnapshot>()
   let failures = 0
+  // panes we delivered a send to and owe HQ the agent's reply
+  const awaitingReply = new Map<string, { label: string; since: number; sawBusy: boolean }>()
   for (;;) {
     try {
       const snaps = await snapshotPanes(backend)
@@ -160,6 +163,24 @@ export async function cmdBridge(argv: string[]): Promise<void> {
       if (!sync.ok) throw new Error(`sync ${sync.status}`)
       prev = applySnapshots(prev, snaps) // only after the relay has the events — a failed POST retries them
 
+      for (const [paneId, wait] of awaitingReply) {
+        const snap = snaps.find((x) => x.id === paneId)
+        if (!snap || Date.now() - wait.since > 300_000) {
+          awaitingReply.delete(paneId)
+          continue
+        }
+        if (snap.state === 'busy') wait.sawBusy = true
+        if (snap.state === 'idle' && (wait.sawBusy || Date.now() - wait.since > 15_000)) {
+          awaitingReply.delete(paneId)
+          if (snap.screen) {
+            await api(relay, secret, '/api/bridge/message', {
+              method: 'POST',
+              body: JSON.stringify({ paneLabel: wait.label, body: snap.screen }),
+            }).catch(() => {})
+          }
+        }
+      }
+
       const work = await api(relay, secret, '/api/bridge/work')
       if (work.ok) {
         const { actions } = (await work.json()) as { actions: HqAction[] }
@@ -169,6 +190,9 @@ export async function cmdBridge(argv: string[]): Promise<void> {
             outcome: e instanceof Error ? e.message : String(e),
           }))
           console.log(`action #${action.id} ${action.kind} → ${action.paneLabel}: ${result.status}${result.outcome ? ` (${result.outcome})` : ''}`)
+          if (action.kind === 'send' && result.status === 'done') {
+            awaitingReply.set(action.paneId, { label: action.paneLabel, since: Date.now(), sawBusy: false })
+          }
           const posted = await api(relay, secret, '/api/bridge/result', {
             method: 'POST',
             body: JSON.stringify({ actionId: action.id, ...result }),
