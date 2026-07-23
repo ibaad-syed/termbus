@@ -1,3 +1,6 @@
 node_modules/
 dist/
 *.log
+
+# local launch drafts — never publish
+docs/launch/
