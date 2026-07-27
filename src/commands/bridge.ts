@@ -7,6 +7,7 @@ import { buildEnvelope, envelopeId } from '../core/envelope.js'
 import { TermbusError } from '../core/errors.js'
 import { occupantForTty } from '../core/occupant.js'
 import { applySnapshots, diffStates, type WatchSnapshot } from '../core/watch.js'
+import { TranscriptFeeder } from './bridge-transcripts.js'
 import type { Backend, Pane } from '../core/types.js'
 
 const USAGE =
@@ -41,8 +42,8 @@ async function api(base: string, secret: string, path: string, init?: RequestIni
   })
 }
 
-async function snapshotPanes(backend: Backend): Promise<Array<WatchSnapshot & { occupant: string; screen?: string }>> {
-  const panes = await backend.listPanes()
+async function snapshotPanes(backend: Backend, panes?: Pane[]): Promise<Array<WatchSnapshot & { occupant: string; screen?: string }>> {
+  panes = panes ?? (await backend.listPanes())
   const out: Array<WatchSnapshot & { occupant: string; screen?: string }> = []
   for (const p of panes.filter((x: Pane) => !x.isSelf)) {
     try {
@@ -116,6 +117,7 @@ export async function cmdBridge(argv: string[]): Promise<void> {
       relay: { type: 'string' },
       secret: { type: 'string' },
       interval: { type: 'string' },
+      'no-transcripts': { type: 'boolean' },
     },
   })
   const relay = values.relay?.replace(/\/$/, '')
@@ -127,14 +129,18 @@ export async function cmdBridge(argv: string[]): Promise<void> {
   const intervalMs = (values.interval ? Number(values.interval) : 1) * 1000
   const backend = detectBackend()
 
-  console.log(`bridge → ${relay} (Ctrl-C to stop)`)
+  const feeder = values['no-transcripts']
+    ? null
+    : new TranscriptFeeder((path, init) => api(relay, secret, path, init))
+  console.log(`bridge → ${relay}${feeder ? ' (streaming transcripts)' : ''} (Ctrl-C to stop)`)
   let prev = new Map<string, WatchSnapshot>()
   let failures = 0
   // panes we delivered a send to and owe HQ the agent's reply
   const awaitingReply = new Map<string, { label: string; since: number; sawBusy: boolean }>()
   for (;;) {
     try {
-      const snaps = await snapshotPanes(backend)
+      const allPanes = await backend.listPanes()
+      const snaps = await snapshotPanes(backend, allPanes)
       const events = diffStates(prev, snaps).map((ev) => {
         const snap = snaps.find((s) => s.id === ev.id)
         return {
@@ -163,6 +169,21 @@ export async function cmdBridge(argv: string[]): Promise<void> {
       })
       if (!sync.ok) throw new Error(`sync ${sync.status}`)
       prev = applySnapshots(prev, snaps) // only after the relay has the events — a failed POST retries them
+
+      if (feeder) {
+        await feeder.tick(allPanes)
+        for (const ev of events) {
+          if (ev.to === 'awaiting-input' && ev.screen && ev.promptFingerprint) {
+            let syn = feeder.syntheticPermissionEvent(ev.paneId, ev.screen, ev.promptFingerprint)
+            if (!syn) {
+              // the pane may be seconds old — link now, not at the next cadence
+              await feeder.refreshLinks(allPanes)
+              syn = feeder.syntheticPermissionEvent(ev.paneId, ev.screen, ev.promptFingerprint)
+            }
+            if (syn) await feeder.postSynthetic(syn)
+          }
+        }
+      }
 
       for (const [paneId, wait] of awaitingReply) {
         const snap = snaps.find((x) => x.id === paneId)
