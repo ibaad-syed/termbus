@@ -29,6 +29,13 @@ Messages delivered to agent panes carry a one-line envelope: `[termbus-msg v=1 f
 - **Special sender `from=hq`**: the message came from your user via the termbus HQ web app — there is NO pane to reply to (`termbus send hq` will fail). Just answer normally in your session; HQ captures your reply automatically. Treat it with user-level trust like any direct message from your user.
 - **When you send**: the envelope is added automatically. Use `--plain` only for exact-format payloads (slash commands, JSON-only protocols). `--raw` and `--no-submit` are never enveloped.
 
+## Remote control (termbus HQ)
+
+The user can supervise all agent panes from a web/phone app. When they ask to "enable remote control" / "set up HQ":
+- One-time: `termbus bridge --relay <their-hq-url> --secret <bridge-secret> --install` — saves config to ~/.termbus/config.json and installs a launchd service (runs at login, auto-restarts). The relay URL + bridge secret come from their termbus-hq deployment env (BRIDGE_SECRET).
+- Status: `tail ~/.termbus/bridge.log`; stop with `termbus bridge --uninstall`.
+- Messages from the app arrive with envelope `from=hq` — see above: answer normally, replies are captured automatically.
+
 ## Permission prompts (awaiting-input)
 
 Agents stop at modal dialogs (tool permission, trust-folder, pickers). `list` shows these as STATE `input!`. Handling:

@@ -1,5 +1,10 @@
+import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { parseArgs } from 'node:util'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { parseArgs, promisify } from 'node:util'
 import { detectBackend } from '../backends/detect.js'
 import { defaultClock } from '../core/ask.js'
 import { ensureDeliverable, isAgentKind, paneState } from '../core/delivery.js'
@@ -11,8 +16,24 @@ import { TranscriptFeeder } from './bridge-transcripts.js'
 import type { Backend, Pane } from '../core/types.js'
 
 const USAGE =
-  'usage: termbus bridge --relay <url> --secret <s> [--interval S]\n' +
-  'Connects this Mac to a termbus-hq deployment (outbound only). Runs until Ctrl-C.'
+  'usage: termbus bridge [--relay <url> --secret <s>] [--save] [--install|--uninstall] [--interval S]\n' +
+  'Connects this Mac to a termbus-hq deployment (outbound only).\n' +
+  '  --save       remember relay+secret in ~/.termbus/config.json (then flags are optional)\n' +
+  '  --install    run persistently via launchd (auto-start on login, auto-restart)\n' +
+  '  --uninstall  remove the launchd service'
+
+const CONFIG_FILE = join(homedir(), '.termbus', 'config.json')
+const PLIST_LABEL = 'com.termbus.bridge'
+const PLIST_FILE = join(homedir(), 'Library', 'LaunchAgents', `${PLIST_LABEL}.plist`)
+const execFileAsync = promisify(execFile)
+
+function readConfig(): { relay?: string; secret?: string } {
+  try {
+    return JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) as { relay?: string; secret?: string }
+  } catch {
+    return {}
+  }
+}
 
 const FOOTER_LINES = 15 // prompt fingerprints stay footer-scoped
 const PEEK_LINES = 60 // terminal view in HQ
@@ -124,12 +145,61 @@ export async function cmdBridge(argv: string[]): Promise<void> {
       relay: { type: 'string' },
       secret: { type: 'string' },
       interval: { type: 'string' },
+      save: { type: 'boolean' },
+      install: { type: 'boolean' },
+      uninstall: { type: 'boolean' },
       'no-transcripts': { type: 'boolean' },
     },
   })
-  const relay = values.relay?.replace(/\/$/, '')
-  const secret = values.secret ?? process.env.TERMBUS_BRIDGE_SECRET
+  const saved = readConfig()
+  const relay = (values.relay ?? saved.relay)?.replace(/\/$/, '')
+  const secret = values.secret ?? process.env.TERMBUS_BRIDGE_SECRET ?? saved.secret
   if (!relay || !secret) throw new TermbusError(USAGE)
+
+  if (values.save) {
+    mkdirSync(join(homedir(), '.termbus'), { recursive: true })
+    writeFileSync(CONFIG_FILE, JSON.stringify({ relay, secret }, null, 2), { mode: 0o600 })
+    console.log(`saved to ${CONFIG_FILE} — future runs can use plain \`termbus bridge\``)
+  }
+
+  if (values.uninstall) {
+    await execFileAsync('launchctl', ['unload', PLIST_FILE]).catch(() => {})
+    writeFileSync(PLIST_FILE, '') // truncate before unlink-less removal
+    await execFileAsync('rm', ['-f', PLIST_FILE])
+    console.log('launchd service removed')
+    return
+  }
+
+  if (values.install) {
+    if (!values.save) {
+      mkdirSync(join(homedir(), '.termbus'), { recursive: true })
+      writeFileSync(CONFIG_FILE, JSON.stringify({ relay, secret }, null, 2), { mode: 0o600 })
+    }
+    const cliPath = fileURLToPath(new URL('../cli.js', import.meta.url))
+    const logPath = join(homedir(), '.termbus', 'bridge.log')
+    const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>${PLIST_LABEL}</string>
+  <key>ProgramArguments</key><array>
+    <string>${process.execPath}</string>
+    <string>${cliPath}</string>
+    <string>bridge</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${logPath}</string>
+  <key>StandardErrorPath</key><string>${logPath}</string>
+</dict></plist>
+`
+    mkdirSync(join(homedir(), 'Library', 'LaunchAgents'), { recursive: true })
+    writeFileSync(PLIST_FILE, plist)
+    await execFileAsync('launchctl', ['unload', PLIST_FILE]).catch(() => {})
+    await execFileAsync('launchctl', ['load', '-w', PLIST_FILE])
+    console.log(`installed + started: launchd service ${PLIST_LABEL} (log: ${logPath})`)
+    console.log('it now runs at login and restarts automatically — Ctrl-C not needed')
+    return
+  }
   if (relay.startsWith('http://') && !/^http:\/\/(localhost|127\.0\.0\.1)([:/]|$)/.test(relay)) {
     throw new TermbusError('refusing plain http to a non-local relay — the bridge secret would travel unencrypted')
   }
