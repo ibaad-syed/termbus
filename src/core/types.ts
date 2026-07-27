@@ -14,6 +14,8 @@ export interface Backend {
   listPanes(): Promise<Pane[]>
   readScreen(paneId: string): Promise<string>
   sendText(paneId: string, text: string, submit: boolean): Promise<void>
+  /** Optional: set the terminal's own name/title for a pane. */
+  setPaneName?(paneId: string, name: string): Promise<void>
 }
 
 export type OccupantKind = 'claude' | 'codex' | 'shell' | 'command' | 'unknown'

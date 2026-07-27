@@ -114,7 +114,8 @@ export class TranscriptFeeder {
     for (const p of panes) {
       const occ = await occupantForTty(p.tty)
       if (occ.kind !== 'claude' && occ.kind !== 'codex') continue
-      if (!this.paneCwdCache.has(p.id)) this.paneCwdCache.set(p.id, await paneCwd(p.tty))
+      // null means the probe failed (process may have been starting) — retry those
+      if (!this.paneCwdCache.get(p.id)) this.paneCwdCache.set(p.id, await paneCwd(p.tty))
       agentPanes.push({ paneId: p.id, kind: occ.kind, cwd: this.paneCwdCache.get(p.id) ?? null })
     }
     this.links = linkSessionsToPanes(
@@ -123,16 +124,25 @@ export class TranscriptFeeder {
     )
   }
 
-  /** Synthesize a permission_request event for a pane at a prompt. */
+  private postedFingerprints = new Set<string>()
+
+  /** Synthesize a permission_request event for a pane at a prompt. One event
+   * per (pane, fingerprint): the seq derives from the fingerprint, so the
+   * same prompt is idempotent server-side AND deduped bridge-side. */
   syntheticPermissionEvent(
     paneId: string,
     screenTail: string,
     fingerprint: string,
   ): { session: SessionInfo; event: TranscriptEvent } | null {
+    const dedupeKey = `${paneId}:${fingerprint}`
+    if (this.postedFingerprints.has(dedupeKey)) return null
     const entry = [...this.links.entries()].find(([, p]) => p === paneId)
     if (!entry) return null
     const rec = this.tailers.get(entry[0])
     if (!rec) return null
+    this.postedFingerprints.add(dedupeKey)
+    let seqHash = 0
+    for (const c of fingerprint) seqHash = ((seqHash * 33) ^ c.charCodeAt(0)) >>> 0
     return {
       session: rec.info,
       event: {
@@ -140,7 +150,7 @@ export class TranscriptFeeder {
         agent: rec.info.agent,
         sessionId: rec.info.sessionId,
         epoch: SYNTHETIC_EPOCH,
-        seq: Math.floor(Date.now() / 1000),
+        seq: seqHash % 2147483647,
         subSeq: 0,
         ts: new Date().toISOString(),
         kind: 'permission_request',

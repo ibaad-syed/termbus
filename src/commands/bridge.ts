@@ -26,7 +26,7 @@ interface HqAction {
   id: number
   paneId: string
   paneLabel: string
-  kind: 'approve' | 'reject' | 'send'
+  kind: 'approve' | 'reject' | 'send' | 'rename'
   payload: string | null
   promptFingerprint: string | null
 }
@@ -105,6 +105,13 @@ async function executeAction(backend: Backend, action: HqAction): Promise<{ stat
       : action.payload
     await backend.sendText(pane.id, enveloped, true)
     return { status: 'done', outcome: outcome === 'queued' ? 'queued (pane was busy)' : 'delivered' }
+  }
+
+  if (action.kind === 'rename') {
+    if (!action.payload) return { status: 'failed', outcome: 'empty name' }
+    if (!backend.setPaneName) return { status: 'failed', outcome: 'backend cannot rename panes' }
+    await backend.setPaneName(pane.id, action.payload)
+    return { status: 'done', outcome: 'pane renamed' }
   }
 
   return { status: 'failed', outcome: `unknown action kind ${action.kind}` }

@@ -79,6 +79,26 @@ on run argv
 end run
 `
 
+const RENAME_SCRIPT = `
+on run argv
+  set target to item 1 of argv
+  set newName to item 2 of argv
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if (id of s) is target then
+            tell s to set name to newName
+            return "ok"
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  error "session not found: " & target
+end run
+`
+
 async function osascript(script: string, args: string[]): Promise<string> {
   try {
     const { stdout } = await execFileP('osascript', ['-e', script, ...args], {
@@ -152,5 +172,9 @@ export class AppleScriptBackend implements Backend {
 
   async sendText(paneId: string, text: string, submit: boolean): Promise<void> {
     await osascript(SEND_SCRIPT, [paneId, text, submit ? '1' : '0'])
+  }
+
+  async setPaneName(paneId: string, name: string): Promise<void> {
+    await osascript(RENAME_SCRIPT, [paneId, name.slice(0, 120)])
   }
 }
