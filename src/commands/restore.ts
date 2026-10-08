@@ -7,8 +7,9 @@ import { defaultClock } from '../core/ask.js'
 import { TermbusError } from '../core/errors.js'
 import type { Backend } from '../core/types.js'
 import { liveAgents, snapshotFile, terminalInstance } from '../restore/capture.js'
-import { planRestore } from '../restore/plan.js'
-import { buildResumeArgv, launchScript, restoreShellLine } from '../restore/resume-command.js'
+import { describeTree, planRestore, tabLayout, type LeafSpec } from '../restore/plan.js'
+import { firstLeaf, type SplitTree } from '../restore/layout.js'
+import { buildResumeArgv, launchScript, restoreShellLine, shellQuote } from '../restore/resume-command.js'
 import { loadStore, pickGeneration } from '../restore/store.js'
 import type { Generation, SavedAgent } from '../restore/types.js'
 
@@ -142,6 +143,14 @@ async function runRestore(backend: Backend, gen: Generation, dryRun: boolean): P
     console.log('nothing to open')
     return
   }
+  const tabs = plan.windows.map((win) => win.map((tab) => tabLayout(gen.layout, tab)))
+  const leafLabel = (spec: LeafSpec) =>
+    spec.agent ? `${spec.agent.kind} ${spec.agent.sessionId!.slice(0, 8)}` : `shell ${spec.cwd.split('/').pop()}`
+  tabs.forEach((win, wi) =>
+    win.forEach((tab, ti) =>
+      console.log(`  window ${wi + 1} tab ${ti + 1}: ${describeTree(tab.tree, (i) => leafLabel(tab.leaves.get(i)!))}`),
+    ),
+  )
   if (dryRun) return
 
   if (!backend.createWindow || !backend.createTab || !backend.splitPane) {
@@ -151,25 +160,29 @@ async function runRestore(backend: Backend, gen: Generation, dryRun: boolean): P
   mkdirSync(launchDir, { recursive: true, mode: 0o700 })
   const shell = userInfo().shell || process.env.SHELL || '/bin/zsh'
   const opened: string[] = []
-  for (const win of plan.windows) {
+  let n = 0
+  // each pane EXECUTES its own launch script: nothing is typed into a pane
+  const optsFor = (spec: LeafSpec) => {
+    const script = join(launchDir, `${spec.agent?.sessionId ?? `shell-${process.pid}-${n++}`}.sh`)
+    const line = spec.agent ? lines.get(spec.agent)! : `cd ${shellQuote(spec.cwd)}`
+    writeFileSync(script, launchScript(shell, line), { mode: 0o700 })
+    chmodSync(script, 0o700)
+    if (spec.agent) opened.push(spec.agent.sessionId!)
+    return { command: /\s/.test(script) ? `"${script}"` : script, profile: spec.profile ?? undefined }
+  }
+  const build = async (tree: SplitTree, pane: string, leaves: Map<number, LeafSpec>): Promise<void> => {
+    if ('leaf' in tree) return
+    const created = await backend.splitPane!(pane, { ...optsFor(leaves.get(firstLeaf(tree.b))!), stacked: tree.dir === 'h' })
+    await build(tree.a, pane, leaves)
+    await build(tree.b, created, leaves)
+  }
+  for (const win of tabs) {
     let anchor: string | null = null // a pane in this window, for new tabs
-    for (const tab of win) {
-      let prev: string | null = null
-      for (const a of tab) {
-        // the pane EXECUTES this script: no typing into a shell of unknown readiness
-        const script = join(launchDir, `${a.sessionId}.sh`)
-        writeFileSync(script, launchScript(shell, lines.get(a)!), { mode: 0o700 })
-        chmodSync(script, 0o700)
-        const command = /\s/.test(script) ? `"${script}"` : script
-        const pane: string = prev
-          ? await backend.splitPane(prev, command)
-          : anchor
-            ? await backend.createTab(anchor, command)
-            : await backend.createWindow(command)
-        anchor ??= pane
-        prev = pane
-        opened.push(a.sessionId!)
-      }
+    for (const { tree, leaves } of win) {
+      const opts = optsFor(leaves.get(firstLeaf(tree))!)
+      const root: string = anchor ? await backend.createTab(anchor, opts) : await backend.createWindow(opts)
+      anchor ??= root
+      await build(tree, root, leaves)
     }
   }
   console.log(`reopened ${opened.length} agent pane${opened.length === 1 ? '' : 's'}`)

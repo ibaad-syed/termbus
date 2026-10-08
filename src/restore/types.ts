@@ -13,6 +13,23 @@ export interface SavedAgent {
   command: string // foreground command line, as ps shows it
 }
 
+/** Every pane (agents, shells, dev servers) with its place and shape, so a
+ *  tab's split layout can be rebuilt. Not part of a generation's identity:
+ *  resizing a pane is not a new state. */
+export interface SavedPane {
+  windowIndex: number
+  tabIndex: number
+  paneIndex: number
+  cols: number
+  rows: number
+  windowPx: { w: number; h: number } | null
+  profile: string | null
+  name: string
+  kind: AgentKind | 'shell' | 'other'
+  sessionId: string | null // agents only
+  cwd: string | null
+}
+
 /**
  * A distinct state of the terminal's agent panes. Consecutive identical states
  * share one generation (only lastSeenAt moves). `instance` identifies one run
@@ -25,6 +42,8 @@ export interface Generation {
   takenAt: number
   lastSeenAt: number
   agents: SavedAgent[]
+  /** absent in snapshots taken before layout capture existed */
+  layout?: SavedPane[]
 }
 
 export interface SnapshotStore {

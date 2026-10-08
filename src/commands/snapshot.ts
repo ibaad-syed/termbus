@@ -5,7 +5,7 @@ import { defaultClock } from '../core/ask.js'
 import { TermbusError } from '../core/errors.js'
 import { installLaunchAgent, uninstallLaunchAgent } from '../core/launchd.js'
 import { SNAPSHOT_ARGS, SNAPSHOT_LABEL, writeAutosaveState } from '../restore/autosave.js'
-import { captureAgents, liveAgents, snapshotFile, terminalInstance } from '../restore/capture.js'
+import { captureState, liveAgents, snapshotFile, terminalInstance } from '../restore/capture.js'
 import { planRestore } from '../restore/plan.js'
 import { loadStore, pickGeneration, recordGeneration, saveStore } from '../restore/store.js'
 import type { SnapshotStore } from '../restore/types.js'
@@ -53,15 +53,16 @@ async function notify(message: string): Promise<void> {
 async function takeSnapshot(notifyRestart: boolean): Promise<number | null> {
   const instance = await terminalInstance()
   if (!instance) return null // never launch iTerm2 just to look at it
-  const agents = await captureAgents(detectBackend())
-  if (!agents || (await terminalInstance()) !== instance) return null
+  const state = await captureState(detectBackend())
+  if (!state || (await terminalInstance()) !== instance) return null
+  const { agents, layout } = state
   const path = snapshotFile()
   const store = loadStore(path)
   if (notifyRestart && isNewInstance(store, instance)) {
     const n = agentsToRestore(store, instance, await liveAgents())
     if (n > 0) await notify(`${n} agent${n === 1 ? ' was' : 's were'} open before iTerm restarted. Run: termbus restore`)
   }
-  saveStore(path, recordGeneration(store, { instance, agents, now: Date.now() }))
+  saveStore(path, recordGeneration(store, { instance, agents, layout, now: Date.now() }))
   return agents.length
 }
 

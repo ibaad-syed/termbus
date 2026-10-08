@@ -2,10 +2,10 @@ import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { agentProcessForTty } from '../core/occupant.js'
+import { agentProcessForTty, occupantForTty } from '../core/occupant.js'
 import type { Backend } from '../core/types.js'
 import { probeAgentIdentity } from './identity.js'
-import type { SavedAgent } from './types.js'
+import type { SavedAgent, SavedPane } from './types.js'
 
 const execFileP = promisify(execFile)
 
@@ -40,16 +40,72 @@ export function itermInstanceFromPs(psOutput: string): string | null {
   return null
 }
 
+const SHELLS = new Set(['zsh', 'bash', 'fish', 'sh', 'dash', 'tcsh', 'csh', 'ksh', 'nu'])
+
+/** Working directory of the pane's shell (the first shell on its tty). */
+async function shellCwdForTty(tty: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileP('ps', ['-t', tty.replace(/^\/dev\//, ''), '-o', 'pid=,command='])
+    for (const line of stdout.split('\n')) {
+      const m = line.trim().match(/^(\d+)\s+(\S+)/)
+      if (!m || !SHELLS.has((m[2].split('/').pop() ?? '').replace(/^-/, ''))) continue
+      const { stdout: l } = await execFileP('lsof', ['-a', '-p', m[1], '-d', 'cwd', '-Fn'])
+      const n = l.split('\n').find((x) => x.startsWith('n'))
+      return n ? n.slice(1) : null
+    }
+  } catch {
+    // tty gone
+  }
+  return null
+}
+
 /** Every agent pane right now, with the conversation it is running; null if
  *  the terminal is not running (it is never launched to find out). */
 export async function captureAgents(backend: Backend): Promise<SavedAgent[] | null> {
+  return (await captureState(backend))?.agents ?? null
+}
+
+/** Agents plus the full pane layout (shells included). */
+export async function captureState(backend: Backend): Promise<{ agents: SavedAgent[]; layout: SavedPane[] } | null> {
   const panes = backend.listPanesIfRunning ? await backend.listPanesIfRunning() : await backend.listPanes()
   if (!panes) return null
+  const geometry = backend.paneGeometry ? await backend.paneGeometry().catch(() => null) : null
   const out: SavedAgent[] = []
+  const layout: SavedPane[] = []
   for (const p of panes) {
     const proc = await agentProcessForTty(p.tty)
-    if (!proc) continue
+    const g = geometry?.get(p.id)
+    if (!proc) {
+      const occ = await occupantForTty(p.tty)
+      layout.push({
+        windowIndex: p.windowIndex,
+        tabIndex: p.tabIndex,
+        paneIndex: p.paneIndex,
+        cols: g?.cols ?? 0,
+        rows: g?.rows ?? 0,
+        windowPx: g?.windowPx ?? null,
+        profile: g?.profile ?? null,
+        name: p.title,
+        kind: occ.kind === 'shell' ? 'shell' : 'other',
+        sessionId: null,
+        cwd: await shellCwdForTty(p.tty),
+      })
+      continue
+    }
     const id = await probeAgentIdentity(proc.kind, proc.pid)
+    layout.push({
+      windowIndex: p.windowIndex,
+      tabIndex: p.tabIndex,
+      paneIndex: p.paneIndex,
+      cols: g?.cols ?? 0,
+      rows: g?.rows ?? 0,
+      windowPx: g?.windowPx ?? null,
+      profile: g?.profile ?? null,
+      name: p.title,
+      kind: proc.kind,
+      sessionId: id.sessionId,
+      cwd: id.cwd,
+    })
     out.push({
       paneId: p.id,
       windowIndex: p.windowIndex,
@@ -62,7 +118,7 @@ export async function captureAgents(backend: Backend): Promise<SavedAgent[] | nu
       command: proc.command,
     })
   }
-  return out
+  return { agents: out, layout }
 }
 
 /** `ps -axo pid=,tty=,command=` → interactive claude/codex processes (on a tty). */

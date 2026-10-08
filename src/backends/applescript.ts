@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { TermbusError } from '../core/errors.js'
-import type { Backend, Pane } from '../core/types.js'
+import type { Backend, CreatePaneOptions, Pane } from '../core/types.js'
 
 const execFileP = promisify(execFile)
 
@@ -107,16 +107,31 @@ on run argv
 end run
 `
 
-// Layout creation takes an optional command: when given, the pane runs it
-// instead of the profile's shell/command, so nothing has to be typed into a
-// pane whose readiness is unknown.
+// Layout creation. argv: command ("" = profile default), profile ("" =
+// default profile; an unknown name falls back to default), then the target.
+// With a command, the pane runs it instead of the profile's shell, so nothing
+// has to be typed into a pane whose readiness is unknown.
 const CREATE_WINDOW_SCRIPT = `
 on run argv
+  set cmd to item 1 of argv
+  set prof to item 2 of argv
   tell application "iTerm2"
-    if (count of argv) > 0 then
-      set w to (create window with default profile command (item 1 of argv))
-    else
-      set w to (create window with default profile)
+    set w to missing value
+    if prof is not "" then
+      try
+        if cmd is "" then
+          set w to (create window with profile prof)
+        else
+          set w to (create window with profile prof command cmd)
+        end if
+      end try
+    end if
+    if w is missing value then
+      if cmd is "" then
+        set w to (create window with default profile)
+      else
+        set w to (create window with default profile command cmd)
+      end if
     end if
     return id of current session of w
   end tell
@@ -125,16 +140,30 @@ end run
 
 const CREATE_TAB_SCRIPT = `
 on run argv
-  set target to item 1 of argv
+  set cmd to item 1 of argv
+  set prof to item 2 of argv
+  set target to item 3 of argv
   tell application "iTerm2"
     repeat with w in windows
       repeat with t in tabs of w
         repeat with s in sessions of t
           if (id of s) is target then
-            if (count of argv) > 1 then
-              tell w to set nt to (create tab with default profile command (item 2 of argv))
-            else
-              tell w to set nt to (create tab with default profile)
+            set nt to missing value
+            if prof is not "" then
+              try
+                if cmd is "" then
+                  tell w to set nt to (create tab with profile prof)
+                else
+                  tell w to set nt to (create tab with profile prof command cmd)
+                end if
+              end try
+            end if
+            if nt is missing value then
+              if cmd is "" then
+                tell w to set nt to (create tab with default profile)
+              else
+                tell w to set nt to (create tab with default profile command cmd)
+              end if
             end if
             return id of current session of nt
           end if
@@ -148,16 +177,47 @@ end run
 
 const SPLIT_SCRIPT = `
 on run argv
-  set target to item 1 of argv
+  set cmd to item 1 of argv
+  set prof to item 2 of argv
+  set target to item 3 of argv
+  set stacked to (item 4 of argv) is "h"
   tell application "iTerm2"
     repeat with w in windows
       repeat with t in tabs of w
         repeat with s in sessions of t
           if (id of s) is target then
-            if (count of argv) > 1 then
-              tell s to set ns to (split vertically with default profile command (item 2 of argv))
-            else
-              tell s to set ns to (split vertically with default profile)
+            set ns to missing value
+            if prof is not "" then
+              try
+                if stacked then
+                  if cmd is "" then
+                    tell s to set ns to (split horizontally with profile prof)
+                  else
+                    tell s to set ns to (split horizontally with profile prof command cmd)
+                  end if
+                else
+                  if cmd is "" then
+                    tell s to set ns to (split vertically with profile prof)
+                  else
+                    tell s to set ns to (split vertically with profile prof command cmd)
+                  end if
+                end if
+              end try
+            end if
+            if ns is missing value then
+              if stacked then
+                if cmd is "" then
+                  tell s to set ns to (split horizontally with default profile)
+                else
+                  tell s to set ns to (split horizontally with default profile command cmd)
+                end if
+              else
+                if cmd is "" then
+                  tell s to set ns to (split vertically with default profile)
+                else
+                  tell s to set ns to (split vertically with default profile command cmd)
+                end if
+              end if
             end if
             return id of ns
           end if
@@ -168,6 +228,51 @@ on run argv
   error "session not found: " & target
 end run
 `
+
+// Sizes, profiles and window shapes for layout capture. Never launches iTerm2.
+const GEOMETRY_SCRIPT = `
+on run argv
+  if application "iTerm2" is not running then return "NOT_RUNNING"
+  set fieldSep to character id 31
+  set recSep to character id 30
+  set out to ""
+  tell application "iTerm2"
+    repeat with w in windows
+      set b to bounds of w
+      set ww to (item 3 of b) - (item 1 of b)
+      set wh to (item 4 of b) - (item 2 of b)
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          set out to out & (id of s) & fieldSep & (columns of s) & fieldSep & (rows of s) & fieldSep & ww & fieldSep & wh & fieldSep & (profile name of s) & recSep
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  return out
+end run
+`
+
+export interface PaneGeometry {
+  cols: number
+  rows: number
+  windowPx: { w: number; h: number }
+  profile: string
+}
+
+export function parseGeometryOutput(raw: string): Map<string, PaneGeometry> {
+  const out = new Map<string, PaneGeometry>()
+  for (const rec of raw.split(RS)) {
+    const f = rec.split(FS)
+    if (f.length < 6) continue
+    out.set(f[0], {
+      cols: Number(f[1]),
+      rows: Number(f[2]),
+      windowPx: { w: Number(f[3]), h: Number(f[4]) },
+      profile: f.slice(5).join(FS),
+    })
+  }
+  return out
+}
 
 async function osascript(script: string, args: string[]): Promise<string> {
   try {
@@ -253,15 +358,20 @@ export class AppleScriptBackend implements Backend {
     await osascript(RENAME_SCRIPT, [paneId, name.slice(0, 120)])
   }
 
-  async createWindow(command?: string): Promise<string> {
-    return osascript(CREATE_WINDOW_SCRIPT, command ? [command] : [])
+  async createWindow(opts: CreatePaneOptions = {}): Promise<string> {
+    return osascript(CREATE_WINDOW_SCRIPT, [opts.command ?? '', opts.profile ?? ''])
   }
 
-  async createTab(nearPaneId: string, command?: string): Promise<string> {
-    return osascript(CREATE_TAB_SCRIPT, command ? [nearPaneId, command] : [nearPaneId])
+  async createTab(nearPaneId: string, opts: CreatePaneOptions = {}): Promise<string> {
+    return osascript(CREATE_TAB_SCRIPT, [opts.command ?? '', opts.profile ?? '', nearPaneId])
   }
 
-  async splitPane(paneId: string, command?: string): Promise<string> {
-    return osascript(SPLIT_SCRIPT, command ? [paneId, command] : [paneId])
+  async splitPane(paneId: string, opts: CreatePaneOptions & { stacked?: boolean } = {}): Promise<string> {
+    return osascript(SPLIT_SCRIPT, [opts.command ?? '', opts.profile ?? '', paneId, opts.stacked ? 'h' : 'v'])
+  }
+
+  async paneGeometry(): Promise<Map<string, PaneGeometry> | null> {
+    const raw = await osascript(GEOMETRY_SCRIPT, [])
+    return raw === 'NOT_RUNNING' ? null : parseGeometryOutput(raw)
   }
 }

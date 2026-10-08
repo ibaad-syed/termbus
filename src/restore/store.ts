@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import type { Generation, SavedAgent, SnapshotStore } from './types.js'
+import type { Generation, SavedAgent, SavedPane, SnapshotStore } from './types.js'
 
 export const DEFAULT_MAX_GENERATIONS = 50
 
@@ -23,7 +23,7 @@ function sameAgents(a: SavedAgent[], b: SavedAgent[]): boolean {
 /** Record the current state. Pure: returns a new store. */
 export function recordGeneration(
   store: SnapshotStore,
-  snap: { instance: string | null; agents: SavedAgent[]; now: number },
+  snap: { instance: string | null; agents: SavedAgent[]; layout?: SavedPane[]; now: number },
   max = DEFAULT_MAX_GENERATIONS,
 ): SnapshotStore {
   const last = store.generations[store.generations.length - 1]
@@ -31,7 +31,10 @@ export function recordGeneration(
     return {
       ...store,
       // same state: refresh the timestamp and the (cosmetic) titles
-      generations: [...store.generations.slice(0, -1), { ...last, lastSeenAt: snap.now, agents: snap.agents }],
+      generations: [
+        ...store.generations.slice(0, -1),
+        { ...last, lastSeenAt: snap.now, agents: snap.agents, ...(snap.layout ? { layout: snap.layout } : {}) },
+      ],
     }
   }
   const gen: Generation = {
@@ -40,6 +43,7 @@ export function recordGeneration(
     takenAt: snap.now,
     lastSeenAt: snap.now,
     agents: snap.agents,
+    ...(snap.layout ? { layout: snap.layout } : {}),
   }
   return { v: 1, nextId: store.nextId + 1, generations: [...store.generations, gen].slice(-max) }
 }

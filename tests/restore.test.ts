@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { claudeSessionFromFile, codexMainThread } from '../src/restore/identity.js'
 import { buildResumeArgv, launchScript, restoreShellLine, shellQuote } from '../src/restore/resume-command.js'
 import { emptyStore, pickGeneration, recordGeneration, STABLE_MS } from '../src/restore/store.js'
-import { planRestore } from '../src/restore/plan.js'
+import { describeTree, planRestore, tabLayout } from '../src/restore/plan.js'
 import { agentProcessesFromPs, itermInstanceFromPs } from '../src/restore/capture.js'
-import type { SavedAgent } from '../src/restore/types.js'
+import type { SavedAgent, SavedPane } from '../src/restore/types.js'
 
 // Real shape of ~/.claude/sessions/<pid>.json (Claude Code 2.1.x)
 const CLAUDE_SESSION_FILE = JSON.stringify({
@@ -336,5 +336,51 @@ describe('launchScript', () => {
     const s = launchScript('/opt/homebrew/bin/fish', 'cd /w && codex resume x')
     expect(s.startsWith('#!/bin/zsh -il\n')).toBe(true)
     expect(s.endsWith('exec /opt/homebrew/bin/fish -il\n')).toBe(true)
+  })
+})
+
+describe('tabLayout', () => {
+  const pane = (over: Partial<SavedPane>): SavedPane => ({
+    windowIndex: 1,
+    tabIndex: 1,
+    paneIndex: 1,
+    cols: 80,
+    rows: 24,
+    windowPx: { w: 570, h: 462 },
+    profile: 'Default',
+    name: '',
+    kind: 'claude',
+    sessionId: null,
+    cwd: '/w',
+    ...over,
+  })
+  // left: claude (tall); right: codex over a shell
+  const layout = [
+    pane({ paneIndex: 1, cols: 38, rows: 23, kind: 'claude', sessionId: 'c1', profile: 'Tall' }),
+    pane({ paneIndex: 2, cols: 40, rows: 11, kind: 'codex', sessionId: 'x1' }),
+    pane({ paneIndex: 3, cols: 40, rows: 11, kind: 'shell', cwd: '/w/api' }),
+  ]
+  const c1 = agent({ sessionId: 'c1', paneIndex: 1 })
+  const x1 = agent({ sessionId: 'x1', kind: 'codex', paneIndex: 2 })
+  const label = (t: ReturnType<typeof tabLayout>) =>
+    describeTree(t.tree, (i) => (t.leaves.get(i)!.agent?.sessionId ?? `sh:${t.leaves.get(i)!.cwd}`))
+
+  it('rebuilds the split tree with shells in place and profiles kept', () => {
+    const t = tabLayout(layout, [c1, x1])
+    expect(label(t)).toBe('[c1 | [x1 / sh:/w/api]]')
+    expect(t.leaves.get(0)!.profile).toBe('Tall')
+  })
+
+  it('an agent still running elsewhere drops out; its split collapses', () => {
+    expect(label(tabLayout(layout, [c1]))).toBe('[c1 | sh:/w/api]')
+  })
+
+  it('no saved layout (old snapshot): agents side by side', () => {
+    expect(label(tabLayout(undefined, [c1, x1]))).toBe('[c1 | x1]')
+  })
+
+  it('an agent missing from the layout is appended to the right', () => {
+    const extra = agent({ sessionId: 'z9', paneIndex: 9 })
+    expect(label(tabLayout(layout, [c1, x1, extra]))).toBe('[[c1 | [x1 / sh:/w/api]] | z9]')
   })
 })
