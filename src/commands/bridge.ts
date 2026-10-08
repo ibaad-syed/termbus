@@ -11,6 +11,8 @@ import { ensureDeliverable, isAgentKind, paneState } from '../core/delivery.js'
 import { buildEnvelope, envelopeId } from '../core/envelope.js'
 import { TermbusError } from '../core/errors.js'
 import { occupantForTty } from '../core/occupant.js'
+import { looksLikeQuestionDialog } from '../core/idle.js'
+import { planAnswerSteps, runAnswerSteps, validateAnswers, verifyFreshDialog, type QuestionAnswer } from '../core/question.js'
 import { applySnapshots, diffStates, type WatchSnapshot } from '../core/watch.js'
 import { TranscriptFeeder } from './bridge-transcripts.js'
 import type { Backend, Pane } from '../core/types.js'
@@ -47,7 +49,7 @@ interface HqAction {
   id: number
   paneId: string
   paneLabel: string
-  kind: 'approve' | 'reject' | 'send' | 'rename'
+  kind: 'approve' | 'reject' | 'send' | 'rename' | 'answer'
   payload: string | null
   promptFingerprint: string | null
 }
@@ -89,7 +91,52 @@ async function snapshotPanes(backend: Backend, panes?: Pane[]): Promise<Array<Wa
   return out
 }
 
-async function executeAction(backend: Backend, action: HqAction): Promise<{ status: string; outcome?: string }> {
+/** True when an agent pane's screen is an interactive question dialog. */
+function isQuestionScreen(occupant: string, screen: string | undefined): boolean {
+  return !!screen && (occupant === 'claude' || occupant === 'codex') && looksLikeQuestionDialog(occupant, screen)
+}
+
+/**
+ * kind=answer: payload {callId, answers[]}. The questions themselves come from
+ * this Mac's own transcript (never from the relay), the dialog on screen must
+ * be exactly that question in its untouched state, and every keystroke step is
+ * screen-verified — anything off returns 'stale' with nothing typed.
+ */
+export async function executeAnswer(
+  backend: Backend,
+  pane: Pane,
+  occKind: string,
+  action: Pick<HqAction, 'payload'>,
+  feeder: Pick<TranscriptFeeder, 'openQuestion' | 'linkedPane'> | null,
+  clock = defaultClock,
+): Promise<{ status: string; outcome?: string }> {
+  let payload: { callId?: unknown; answers?: unknown }
+  try {
+    payload = JSON.parse(action.payload ?? '')
+  } catch {
+    return { status: 'failed', outcome: 'malformed answer payload' }
+  }
+  if (typeof payload.callId !== 'string') return { status: 'failed', outcome: 'answer has no question id' }
+  if (!feeder) return { status: 'failed', outcome: 'transcripts are off on this bridge — cannot verify the question' }
+  const q = feeder.openQuestion(payload.callId)
+  if (!q) return { status: 'stale', outcome: 'that question is no longer open' }
+  if (occKind !== q.agent) return { status: 'stale', outcome: `pane is running ${occKind}, the question came from ${q.agent}` }
+  const linked = feeder.linkedPane(q.sessionId)
+  if (linked && linked !== pane.id) return { status: 'stale', outcome: 'the question belongs to a different pane' }
+  const answers = payload.answers as QuestionAnswer[]
+  const invalid = validateAnswers(q.agent, q.items, answers, q.allowOther)
+  if (invalid) return { status: 'failed', outcome: invalid }
+  const screen = await backend.readScreen(pane.id)
+  const mismatch = verifyFreshDialog(q.agent, screen, q.items)
+  if (mismatch) return { status: 'stale', outcome: mismatch }
+  return runAnswerSteps(backend, pane.id, planAnswerSteps(q.agent, q.items, answers), clock)
+}
+
+async function executeAction(
+  backend: Backend,
+  action: HqAction,
+  feeder: TranscriptFeeder | null = null,
+): Promise<{ status: string; outcome?: string }> {
   const panes = await backend.listPanes()
   const pane = panes.find((p) => p.id === action.paneId)
   if (!pane) return { status: 'failed', outcome: 'pane no longer exists' }
@@ -110,6 +157,10 @@ async function executeAction(backend: Backend, action: HqAction): Promise<{ stat
     }
     await backend.sendText(pane.id, action.kind === 'approve' ? '\r' : '\u001b', false)
     return { status: 'done' }
+  }
+
+  if (action.kind === 'answer') {
+    return executeAnswer(backend, pane, occ.kind, action, feeder)
   }
 
   if (action.kind === 'send') {
@@ -228,6 +279,8 @@ export async function cmdBridge(argv: string[]): Promise<void> {
           to: ev.to,
           screen: snap?.screen,
           promptFingerprint: snap?.screen ? promptFingerprint(snap.screen) : undefined,
+          // a question dialog is answered from its question card, not approve/reject
+          ...(ev.to === 'awaiting-input' && snap && isQuestionScreen(snap.occupant, snap.screen) ? { dialog: 'question' } : {}),
         }
       })
       const sync = await api(relay, secret, '/api/bridge/sync', {
@@ -250,7 +303,7 @@ export async function cmdBridge(argv: string[]): Promise<void> {
       if (feeder) {
         await feeder.tick(allPanes)
         for (const ev of events) {
-          if (ev.to === 'awaiting-input' && ev.screen && ev.promptFingerprint) {
+          if (ev.to === 'awaiting-input' && ev.screen && ev.promptFingerprint && !('dialog' in ev)) {
             let syn = feeder.syntheticPermissionEvent(ev.paneId, ev.screen, ev.promptFingerprint)
             if (!syn) {
               // the pane may be seconds old — link now, not at the next cadence
@@ -284,7 +337,7 @@ export async function cmdBridge(argv: string[]): Promise<void> {
       if (work.ok) {
         const { actions } = (await work.json()) as { actions: HqAction[] }
         for (const action of actions) {
-          const result = await executeAction(backend, action).catch((e: unknown) => ({
+          const result = await executeAction(backend, action, feeder).catch((e: unknown) => ({
             status: 'failed',
             outcome: e instanceof Error ? e.message : String(e),
           }))

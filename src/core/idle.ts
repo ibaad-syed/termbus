@@ -35,10 +35,34 @@ const PROMPT_MARKERS: Record<AgentKind, RegExp[]> = {
 export type AgentScreenState = 'idle' | 'busy' | 'awaiting-input'
 
 /**
+ * Interactive question dialogs (Claude AskUserQuestion, Codex
+ * request_user_input). Codex's footer carries "esc to interrupt", which is a
+ * busy marker, so these win over busy: the dialog only renders while the
+ * agent is blocked on the user.
+ */
+const QUESTION_MARKERS: Record<AgentKind, { footer: RegExp; body: RegExp }> = {
+  claude: { footer: /Enter to select · (Tab\/Arrow keys|↑\/↓) to navigate/, body: /[☐☒]/ },
+  codex: { footer: /enter to submit (answer|all)/, body: /Question \d+\/\d+/ },
+}
+
+export function looksLikeQuestionDialog(kind: AgentKind, screen: string): boolean {
+  const lines = screen.split('\n')
+  const tail = lines.slice(-QUESTION_TAIL_LINES).join('\n')
+  // the key-hint footer must be the dialog's bottom edge, not transcript text
+  const lastLines = lines.filter((l) => l.trim()).slice(-4).join('\n')
+  const m = QUESTION_MARKERS[kind]
+  return m.footer.test(lastLines) && m.body.test(tail)
+}
+
+/** Question dialogs are taller than permission prompts (options + descriptions). */
+export const QUESTION_TAIL_LINES = 40
+
+/**
  * Busy wins over prompt markers: while streaming, a transcript can echo
  * dialog-like text, but real dialogs only appear when the agent has stopped.
  */
 export function agentScreenState(kind: AgentKind, screen: string): AgentScreenState {
+  if (looksLikeQuestionDialog(kind, screen)) return 'awaiting-input'
   if (looksBusy(kind, screen)) return 'busy'
   const tail = screen.split('\n').slice(-FOOTER_LINES).join('\n')
   if (PROMPT_MARKERS[kind].some((re) => re.test(tail))) return 'awaiting-input'

@@ -1,5 +1,6 @@
 import type { TranscriptEvent } from './types.js'
 import { MAX_THINKING_CHARS, MAX_TOOL_INPUT_CHARS, truncate } from './types.js'
+import { normalizeQuestionItems, parseCodexAnswers, QUESTION_TOOLS } from './question.js'
 
 /**
  * Codex session files: ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl.
@@ -92,8 +93,8 @@ export function parseCodexLine(
     ctx.skippedNoSession += events.length
     return null
   }
-  // subSeq: emission order within this source line (Codex entries currently
-  // map 1:1, so it is always 0 — stamped for schema uniformity)
+  // subSeq: emission order within this source line (Codex entries map 1:1,
+  // except request_user_input which adds a `question` event after its call)
   return events.map((e, i) => ({ ...e, subSeq: i }))
 }
 
@@ -144,16 +145,52 @@ function mapEntry(
       if (typeof payload.call_id === 'string') ctx.callNames.set(payload.call_id, name)
       const rawInput = pt === 'function_call' ? payload.arguments : payload.input
       const inputPreview = typeof rawInput === 'string' ? truncate(rawInput, MAX_TOOL_INPUT_CHARS) : undefined
-      return [{ ...base, kind: 'tool_call', tool: { name, ...(inputPreview ? { inputPreview } : {}) } }]
+      const call: TranscriptEvent = { ...base, kind: 'tool_call', tool: { name, ...(inputPreview ? { inputPreview } : {}) } }
+      // request_user_input (Plan mode) also emits a structured `question` event
+      if (name === QUESTION_TOOLS.codex && typeof payload.call_id === 'string' && typeof rawInput === 'string') {
+        let parsed: unknown = null
+        try {
+          parsed = JSON.parse(rawInput)
+        } catch {
+          parsed = null
+        }
+        const items = normalizeQuestionItems('codex', parsed)
+        if (items) {
+          return [
+            call,
+            {
+              ...base,
+              kind: 'question',
+              tool: { name },
+              // the TUI always appends "None of the above" (+ notes) to option questions
+              question: { callId: payload.call_id, items, allowOther: true },
+            },
+          ]
+        }
+      }
+      return [call]
     }
     if (pt === 'function_call_output' || pt === 'custom_tool_call_output') {
-      const name = typeof payload.call_id === 'string' ? ctx.callNames.get(payload.call_id) : undefined
       const text = blockText(payload.output)
+      // the call may predate this parser (tailer resumed after a bridge restart):
+      // request_user_input output is recognizable by its {"answers":{id:{"answers":[…]}}} shape
+      const name =
+        (typeof payload.call_id === 'string' ? ctx.callNames.get(payload.call_id) : undefined) ??
+        (pt === 'function_call_output' && text.startsWith('{"answers":{') && parseCodexAnswers(text)
+          ? QUESTION_TOOLS.codex
+          : undefined)
+      let question: TranscriptEvent['question']
+      if (name === QUESTION_TOOLS.codex && typeof payload.call_id === 'string') {
+        const answers = parseCodexAnswers(text)
+        const empty = !answers || Object.values(answers).every((a) => !a)
+        question = { callId: payload.call_id, ...(answers && !empty ? { answers } : { declined: true }) }
+      }
       return [{
         ...base,
         kind: 'tool_result',
         ...(text ? { text: truncate(text) } : {}),
         ...(name ? { tool: { name } } : {}),
+        ...(question ? { question } : {}),
       }]
     }
     if (pt === 'agent_message') {

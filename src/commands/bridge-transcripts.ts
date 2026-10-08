@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { discoverSessions, SessionTailer } from '../transcripts/index.js'
-import type { SessionInfo, TailerState, TranscriptEvent } from '../transcripts/index.js'
+import type { SessionInfo, TailerState, TranscriptEvent, TranscriptQuestionItem } from '../transcripts/index.js'
 import { occupantForTty } from '../core/occupant.js'
 import type { Pane } from '../core/types.js'
 
@@ -20,6 +20,43 @@ const STATE_FILE = join(STATE_DIR, 'bridge-transcripts.json')
 
 interface PersistedState {
   tailers: Record<string, TailerState>
+  /** unanswered questions survive a bridge restart (the tailer resumes past them) */
+  questions?: Record<string, OpenQuestion>
+}
+
+/** A question the agent asked that has no answer in the transcript yet. */
+export interface OpenQuestion {
+  callId: string
+  sessionId: string
+  agent: 'claude' | 'codex'
+  items: TranscriptQuestionItem[]
+  allowOther: boolean
+  ts: string
+}
+
+const MAX_OPEN_QUESTIONS = 50
+
+/** Fold transcript events into the open-question set: a `question` opens,
+ * the tool_result carrying the same callId closes. Pure — unit-testable. */
+export function applyQuestionEvents(open: Map<string, OpenQuestion>, events: TranscriptEvent[]): void {
+  for (const ev of events) {
+    const q = ev.question
+    if (!q) continue
+    if (ev.kind === 'question' && q.items && q.items.length) {
+      open.set(q.callId, {
+        callId: q.callId,
+        sessionId: ev.sessionId,
+        agent: ev.agent,
+        items: q.items,
+        allowOther: q.allowOther === true,
+        ts: ev.ts,
+      })
+    } else if (ev.kind === 'tool_result') {
+      open.delete(q.callId)
+    }
+  }
+  // bounded: oldest first out (Map keeps insertion order)
+  while (open.size > MAX_OPEN_QUESTIONS) open.delete(open.keys().next().value as string)
 }
 
 function loadState(): PersistedState {
@@ -93,6 +130,14 @@ export interface FeederApi {
 export class TranscriptFeeder {
   private tailers = new Map<string, { info: SessionInfo; tailer: SessionTailer }>()
   private state = loadState()
+  /** pane link last declared to the relay per session */
+  private postedLinks = new Map<string, string | null>()
+  private openQuestions = new Map<string, OpenQuestion>(Object.entries(this.state.questions ?? {}))
+
+  /** An unanswered question by callId (from this Mac's own transcripts). */
+  openQuestion(callId: string): OpenQuestion | undefined {
+    return this.openQuestions.get(callId)
+  }
   private links = new Map<string, string>()
   private paneCwdCache = new Map<string, string | null>()
   private tickCount = 0
@@ -187,7 +232,28 @@ export class TranscriptFeeder {
       } catch {
         continue // file may have vanished; next discovery cycle drops it
       }
-      if (events.length === 0) continue
+      if (events.length === 0) {
+        // a session blocked on a question posts nothing more, so a pane link
+        // discovered after its last batch would never reach the relay —
+        // re-declare the session whenever its link changes
+        const linked = this.links.get(info.sessionId) ?? null
+        if (this.postedLinks.get(info.sessionId) !== linked) {
+          const res = await this.api('/api/bridge/transcript', {
+            method: 'POST',
+            body: JSON.stringify({
+              sessions: [{ sessionId: info.sessionId, agent: info.agent, cwd: info.cwd ?? null, paneId: linked }],
+              events: [],
+            }),
+          }).catch(() => null)
+          if (res?.ok) this.postedLinks.set(info.sessionId, linked)
+        }
+        continue
+      }
+      // a question needs its pane link to be answerable — don't wait for the
+      // slow link cadence (the session file may be seconds old)
+      if (events.some((e) => e.kind === 'question') && !this.links.has(info.sessionId)) {
+        await this.refreshLinks(panes, sessions)
+      }
       let allPosted = true
       for (let i = 0; i < events.length; i += 400) {
         const chunk = events.slice(i, i + 400)
@@ -211,7 +277,10 @@ export class TranscriptFeeder {
         }
       }
       if (allPosted) {
+        this.postedLinks.set(info.sessionId, this.links.get(info.sessionId) ?? null)
+        applyQuestionEvents(this.openQuestions, events)
         this.state.tailers[info.sessionId] = tailer.getState()
+        this.state.questions = Object.fromEntries(this.openQuestions)
         saveState(this.state)
       } else {
         // relay refused: drop the tailer so it resumes from the last

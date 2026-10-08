@@ -3,6 +3,9 @@ export type {
   TranscriptEvent,
   TranscriptEventKind,
   TranscriptTool,
+  TranscriptQuestion,
+  TranscriptQuestionItem,
+  TranscriptQuestionOption,
   SessionInfo,
 } from './types.js'
 export { MAX_TEXT_CHARS, MAX_THINKING_CHARS, MAX_TOOL_INPUT_CHARS, truncate } from './types.js'

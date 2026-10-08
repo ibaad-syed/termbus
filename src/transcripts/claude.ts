@@ -1,5 +1,6 @@
 import type { TranscriptEvent } from './types.js'
 import { MAX_THINKING_CHARS, MAX_TOOL_INPUT_CHARS, truncate } from './types.js'
+import { normalizeQuestionItems, parseClaudeAnswers, QUESTION_TOOLS } from './question.js'
 
 /**
  * Claude Code session files: ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl,
@@ -54,6 +55,7 @@ interface ContentBlock {
   input?: unknown
   tool_use_id?: string
   content?: unknown
+  is_error?: boolean
 }
 
 /** Flatten a tool_result `content` (string or block array) to plain text. */
@@ -125,13 +127,32 @@ export function parseClaudeLine(
         if (block.type === 'text' && typeof block.text === 'string') {
           texts.push(block.text)
         } else if (block.type === 'tool_result') {
-          const name = block.tool_use_id ? ctx.toolNames.get(block.tool_use_id) : undefined
+          // the tool_use may predate this parser (tailer resumed mid-file after a
+          // bridge restart): an AskUserQuestion answer is still recognizable by
+          // its toolUseResult shape {questions[], answers{}}
+          const r = entry.toolUseResult
+          const looksLikeAnswer =
+            typeof r === 'object' && r !== null && Array.isArray(r.questions) && typeof r.answers === 'object' && r.answers !== null
+          const name =
+            (block.tool_use_id ? ctx.toolNames.get(block.tool_use_id) : undefined) ??
+            (looksLikeAnswer ? QUESTION_TOOLS.claude : undefined)
           const text = toolResultText(block.content)
+          // an answered (or dismissed) AskUserQuestion resolves its question card
+          let question: TranscriptEvent['question']
+          if (name === QUESTION_TOOLS.claude && block.tool_use_id) {
+            const answers = block.is_error === true ? null : parseClaudeAnswers(entry.toolUseResult)
+            question = {
+              callId: block.tool_use_id,
+              ...(answers ? { answers } : {}),
+              ...(block.is_error === true ? { declined: true } : {}),
+            }
+          }
           events.push({
             ...base,
             kind: 'tool_result',
             ...(text ? { text: truncate(text) } : {}),
             ...(name ? { tool: { name } } : {}),
+            ...(question ? { question } : {}),
           })
         }
         // image and other block types carry nothing displayable — skipped
@@ -160,6 +181,19 @@ export function parseClaudeLine(
             kind: 'tool_call',
             tool: { name: block.name, ...(inputPreview ? { inputPreview } : {}) },
           })
+          // AskUserQuestion also emits a structured `question` event (additive:
+          // consumers that only know tool_call still see the call as before)
+          if (block.name === QUESTION_TOOLS.claude && typeof block.id === 'string') {
+            const items = normalizeQuestionItems('claude', block.input)
+            if (items) {
+              events.push({
+                ...base,
+                kind: 'question',
+                tool: { name: block.name },
+                question: { callId: block.id, items, allowOther: true },
+              })
+            }
+          }
         }
       }
     }

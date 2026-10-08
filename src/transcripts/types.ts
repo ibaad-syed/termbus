@@ -10,6 +10,41 @@ export type TranscriptEventKind =
   | 'permission_request'
   | 'turn_done'
   | 'system'
+  /** an interactive multiple-choice question the agent is blocked on
+   *  (Claude Code AskUserQuestion, Codex request_user_input) — added in v1,
+   *  consumers that don't know it should ignore it */
+  | 'question'
+
+export interface TranscriptQuestionOption {
+  label: string
+  description?: string
+}
+
+export interface TranscriptQuestionItem {
+  /** key the agent's answer map uses for this question: Codex question id,
+   *  Claude question text */
+  key: string
+  header?: string
+  question: string
+  multiSelect: boolean
+  options: TranscriptQuestionOption[]
+}
+
+/**
+ * Structured payload of an interactive question (additive to schema v1).
+ * On a `question` event: callId + items + allowOther. On the `tool_result`
+ * that resolves it: callId + answers (item key → answer text) or declined.
+ */
+export interface TranscriptQuestion {
+  /** tool_use id (Claude) / call_id (Codex) — ties question, answer and HQ action */
+  callId: string
+  items?: TranscriptQuestionItem[]
+  /** the TUI offers a free-text answer (Claude "Type something", Codex "None of the above" + notes) */
+  allowOther?: boolean
+  answers?: Record<string, string>
+  /** the user dismissed the question without answering */
+  declined?: boolean
+}
 
 export interface TranscriptTool {
   name: string
@@ -47,6 +82,8 @@ export interface TranscriptEvent {
   text?: string
   tool?: TranscriptTool
   meta?: Record<string, string>
+  /** kind 'question', or a tool_result answering one */
+  question?: TranscriptQuestion
 }
 
 export interface SessionInfo {
@@ -69,3 +106,8 @@ export const MAX_TOOL_INPUT_CHARS = 500
 export function truncate(s: string, max: number = MAX_TEXT_CHARS): string {
   return s.length > max ? `${s.slice(0, max)}…` : s
 }
+
+/** Question bodies are short by contract; cap them anyway. */
+export const MAX_QUESTION_TEXT_CHARS = 1_000
+export const MAX_QUESTION_ITEMS = 8
+export const MAX_QUESTION_OPTIONS = 8
