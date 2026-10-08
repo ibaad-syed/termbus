@@ -49,7 +49,8 @@ export function looksLikeQuestionDialog(kind: AgentKind, screen: string): boolea
   const lines = screen.split('\n')
   const tail = lines.slice(-QUESTION_TAIL_LINES).join('\n')
   // the key-hint footer must be the dialog's bottom edge, not transcript text
-  const lastLines = lines.filter((l) => l.trim()).slice(-4).join('\n')
+  // (joined with spaces, whitespace collapsed: in a narrow pane the footer wraps)
+  const lastLines = lines.filter((l) => l.trim()).slice(-4).join(' ').replace(/\s+/g, ' ')
   const m = QUESTION_MARKERS[kind]
   return m.footer.test(lastLines) && m.body.test(tail)
 }

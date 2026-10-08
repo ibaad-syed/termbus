@@ -177,6 +177,13 @@ describe('question dialog detection', () => {
     expect(agentScreenState('codex', S.CODEX_THREE_FRESH)).toBe('awaiting-input')
     expect(agentScreenState('claude', S.CLAUDE_TWO_FRESH)).toBe('awaiting-input')
   })
+  it('recognizes the footer when a narrow (split) pane wraps it — seen live', () => {
+    const narrow = S.CLAUDE_TWO_FRESH.replace(
+      'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+      'Enter to select · Tab/Arrow keys to  \nnavigate · Esc to cancel',
+    )
+    expect(looksLikeQuestionDialog('claude', narrow)).toBe(true)
+  })
   it('does not fire once the dialog is gone', () => {
     expect(looksLikeQuestionDialog('claude', S.CLAUDE_TWO_DONE)).toBe(false)
     expect(looksLikeQuestionDialog('codex', S.CODEX_DONE)).toBe(false)
