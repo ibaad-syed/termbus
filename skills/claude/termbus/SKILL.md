@@ -21,6 +21,7 @@ You are running inside an iTerm2 pane. Other panes (in this tab, other tabs, oth
 - `termbus send <target> --raw "2\r"` — raw input for TUIs/menus. Escapes: `\r` Enter (TUIs need `\r`, not `\n`), `\t` Tab, `\e` ESC, `\x03` Ctrl-C, `\e[A` up arrow.
 - `termbus whoami` — identify your own pane.
 - `termbus watch [target ...] [--interval S] [--notify] [--push <pane>]` — long-running monitor (give it its own pane). Prints state transitions; when a watched agent stops at a permission prompt it can fire a macOS notification and/or queue a heads-up message to a supervisor pane.
+- `termbus restore [--dry-run]` — after iTerm2 quit or the Mac restarted: reopens the agent panes that were open, each resuming its own conversation (agents still running are skipped). Agent panes are remembered automatically in the background; `termbus restore --list` shows saved snapshots. Use when the user asks to bring back / recover their agents or sessions.
 
 ## Sender attribution (message envelopes)
 

@@ -4,3 +4,6 @@ dist/
 
 # local launch drafts — never publish
 docs/launch/
+
+# agent worktrees
+.claude/worktrees/

@@ -32,6 +32,14 @@ on run argv
 end run
 `
 
+// Same as LIST_SCRIPT, but never launches iTerm2: \`tell application\` would
+// start it, so check first. Background snapshots must not reopen a terminal
+// the user just quit.
+const LIST_IF_RUNNING_SCRIPT = LIST_SCRIPT.replace(
+  'on run argv\n',
+  'on run argv\n  if application "iTerm2" is not running then return "NOT_RUNNING"\n',
+)
+
 const READ_SCRIPT = `
 on run argv
   set target to item 1 of argv
@@ -90,6 +98,68 @@ on run argv
           if (id of s) is target then
             tell s to set name to newName
             return "ok"
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  error "session not found: " & target
+end run
+`
+
+// Layout creation takes an optional command: when given, the pane runs it
+// instead of the profile's shell/command, so nothing has to be typed into a
+// pane whose readiness is unknown.
+const CREATE_WINDOW_SCRIPT = `
+on run argv
+  tell application "iTerm2"
+    if (count of argv) > 0 then
+      set w to (create window with default profile command (item 1 of argv))
+    else
+      set w to (create window with default profile)
+    end if
+    return id of current session of w
+  end tell
+end run
+`
+
+const CREATE_TAB_SCRIPT = `
+on run argv
+  set target to item 1 of argv
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if (id of s) is target then
+            if (count of argv) > 1 then
+              tell w to set nt to (create tab with default profile command (item 2 of argv))
+            else
+              tell w to set nt to (create tab with default profile)
+            end if
+            return id of current session of nt
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  error "session not found: " & target
+end run
+`
+
+const SPLIT_SCRIPT = `
+on run argv
+  set target to item 1 of argv
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if (id of s) is target then
+            if (count of argv) > 1 then
+              tell s to set ns to (split vertically with default profile command (item 2 of argv))
+            else
+              tell s to set ns to (split vertically with default profile)
+            end if
+            return id of ns
           end if
         end repeat
       end repeat
@@ -166,6 +236,11 @@ export class AppleScriptBackend implements Backend {
     return parseListOutput(raw, this.selfSessionId)
   }
 
+  async listPanesIfRunning(): Promise<Pane[] | null> {
+    const raw = await osascript(LIST_IF_RUNNING_SCRIPT, [])
+    return raw === 'NOT_RUNNING' ? null : parseListOutput(raw, this.selfSessionId)
+  }
+
   async readScreen(paneId: string): Promise<string> {
     return osascript(READ_SCRIPT, [paneId])
   }
@@ -176,5 +251,17 @@ export class AppleScriptBackend implements Backend {
 
   async setPaneName(paneId: string, name: string): Promise<void> {
     await osascript(RENAME_SCRIPT, [paneId, name.slice(0, 120)])
+  }
+
+  async createWindow(command?: string): Promise<string> {
+    return osascript(CREATE_WINDOW_SCRIPT, command ? [command] : [])
+  }
+
+  async createTab(nearPaneId: string, command?: string): Promise<string> {
+    return osascript(CREATE_TAB_SCRIPT, command ? [nearPaneId, command] : [nearPaneId])
+  }
+
+  async splitPane(paneId: string, command?: string): Promise<string> {
+    return osascript(SPLIT_SCRIPT, command ? [paneId, command] : [paneId])
   }
 }

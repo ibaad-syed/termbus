@@ -11,6 +11,10 @@ Usage:
   termbus ask --batch '{"target":"prompt",...}' [--timeout S] [--mailbox]
   termbus watch [target ...] [--interval S] [--notify] [--push <target>]
   termbus bridge --relay <url> --secret <s>  connect this Mac to termbus-hq
+  termbus restore [--dry-run] [--list]     reopen agents from before a restart, each resuming its conversation
+  termbus snapshot [--uninstall]           agents are remembered automatically; this saves now (or turns it off)
+  termbus update                           install the latest termbus and restart its background services (also: --update)
+  termbus --version                        print the installed version
   termbus whoami                           this pane's identity
   termbus install-skill                    install the Claude Code skill
 
@@ -30,6 +34,7 @@ Never re-send after a timeout — use \`termbus check\` and keep waiting.`
 
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2)
+  await (await import('./restore/autosave.js')).ensureAutosave(cmd, rest)
   switch (cmd) {
     case 'list':
       return (await import('./commands/list.js')).cmdList(rest)
@@ -43,10 +48,26 @@ async function main(): Promise<void> {
       return (await import('./commands/bridge.js')).cmdBridge(rest)
     case 'ask':
       return (await import('./commands/ask.js')).cmdAsk(rest)
+    case 'snapshot':
+      return (await import('./commands/snapshot.js')).cmdSnapshot(rest)
+    case 'restore':
+      return (await import('./commands/restore.js')).cmdRestore(rest)
+    case 'update':
+    case '--update':
+      return (await import('./commands/update.js')).cmdUpdate(rest)
     case 'whoami':
       return (await import('./commands/whoami.js')).cmdWhoami()
     case 'install-skill':
       return (await import('./commands/install-skill.js')).cmdInstallSkill()
+    case '--version':
+    case '-v':
+    case 'version': {
+      const { readFileSync } = await import('node:fs')
+      const { join } = await import('node:path')
+      const { packageRoot } = await import('./commands/install-skill.js')
+      console.log((JSON.parse(readFileSync(join(packageRoot(), 'package.json'), 'utf8')) as { version: string }).version)
+      return
+    }
     case undefined:
     case 'help':
     case '--help':

@@ -16,6 +16,13 @@ export interface Backend {
   sendText(paneId: string, text: string, submit: boolean): Promise<void>
   /** Optional: set the terminal's own name/title for a pane. */
   setPaneName?(paneId: string, name: string): Promise<void>
+  /** Like listPanes, but null instead of launching a terminal that is not running. */
+  listPanesIfRunning?(): Promise<Pane[] | null>
+  /** Optional layout creation (used by restore). Each returns the new pane's
+   *  id; with `command`, the pane runs that instead of the profile default. */
+  createWindow?(command?: string): Promise<string>
+  createTab?(nearPaneId: string, command?: string): Promise<string>
+  splitPane?(paneId: string, command?: string): Promise<string>
 }
 
 export type OccupantKind = 'claude' | 'codex' | 'shell' | 'command' | 'unknown'
