@@ -3,8 +3,8 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { agentDef, agentForCommand, isAgentKind } from '../core/agents.js'
-import { applyMarkToOccupant, loadMarks } from '../core/marks.js'
-import { agentProcessForTty, occupantForTty } from '../core/occupant.js'
+import { loadMarks } from '../core/marks.js'
+import { agentProcessForTty, occupantForPane } from '../core/occupant.js'
 import type { AgentKind, Backend } from '../core/types.js'
 import { probeAgentIdentity } from './identity.js'
 import type { SavedAgent, SavedPane } from './types.js'
@@ -78,7 +78,7 @@ export async function captureState(backend: Backend): Promise<{ agents: SavedAge
   for (const p of panes) {
     const proc = await agentProcessForTty(p.tty)
     const g = geometry?.get(p.id)
-    const occ = applyMarkToOccupant(await occupantForTty(p.tty), marks[p.id])
+    const occ = await occupantForPane(p, marks)
     // Agents restore can't resume — screen-only types from agents.json, and
     // manual marks (whose conversation can't be told from the process) — are
     // remembered without a session; restore lists them as skipped.

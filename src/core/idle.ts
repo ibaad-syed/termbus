@@ -74,16 +74,29 @@ export const QUESTION_TAIL_LINES = 40
  *  and right padding dropped), so its regexes can anchor on `$`. */
 const IDLE_LINES = 14
 
-export function looksIdle(kind: AgentKind, screen: string): boolean {
-  const idle = screenOf(kind).idle
-  if (!idle) return true
-  const last = screen
+const lastLines = (screen: string) =>
+  screen
     .split('\n')
     .map((l) => l.replace(/\s+$/, ''))
     .filter(Boolean)
     .slice(-IDLE_LINES)
     .join('\n')
-  return idle.some((re) => re.test(last))
+
+export function looksIdle(kind: AgentKind, screen: string): boolean {
+  const idle = screenOf(kind).idle
+  if (!idle) return true
+  return idle.some((re) => re.test(lastLines(screen)))
+}
+
+/**
+ * Messages typed in from HQ (remote, unattended) get a stricter gate for
+ * agents with `screen.remoteReady`: the pane must read idle AND show that
+ * chrome. Returns the refusal, or null when it's fine to type.
+ */
+export function remoteSendRefusal(kind: AgentKind, screen: string): string | null {
+  const gate = screenOf(kind).remoteReady
+  if (!gate) return null
+  return agentScreenState(kind, screen) === 'idle' && gate.pattern.test(lastLines(screen)) ? null : gate.refusal
 }
 
 /**

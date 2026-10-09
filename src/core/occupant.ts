@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { agentForCommand, isAgentKind } from './agents.js'
-import { applyMarkToOccupant, loadMarks } from './marks.js'
+import { readConfig } from './config.js'
+import { applyMarkToOccupant, loadMarks, type ForegroundProc, type Marks } from './marks.js'
 import type { AgentKind, Occupant, Pane } from './types.js'
 
 const execFileP = promisify(execFile)
@@ -96,10 +97,51 @@ export async function occupantForTty(tty: string): Promise<Occupant> {
   }
 }
 
-/** A pane's occupant: process detection, overridden by a manual mark (`termbus mark`). */
+/** The process start time as ps renders it, in UTC and in local time (pid reuse guard). */
+export async function processStart(pid: number): Promise<string[] | null> {
+  const out: string[] = []
+  for (const env of [{ ...process.env, TZ: 'UTC' }, process.env]) {
+    try {
+      const { stdout } = await execFileP('ps', ['-o', 'lstart=', '-p', String(pid)], { env })
+      if (stdout.trim()) out.push(stdout.trim())
+    } catch {
+      // process gone
+    }
+  }
+  return out.length > 0 ? out : null
+}
+
+async function psTty(tty: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileP('ps', ['-t', tty.replace(/^\/dev\//, ''), '-o', 'pid=,ppid=,stat=,command='])
+    return stdout
+  } catch {
+    return null // ps exits 1 when tty has no processes
+  }
+}
+
+/** The program in front of a pane, with its start time — what a mark binds to. */
+export async function foregroundForTty(tty: string): Promise<ForegroundProc | null> {
+  const out = await psTty(tty)
+  const fg = out ? foregroundProcess(out) : null
+  return fg ? { pid: fg.pid, command: fg.command, start: await processStart(fg.pid) } : null
+}
+
+/**
+ * A pane's occupant: process detection, overridden by a manual mark
+ * (`termbus mark`) while the mark still describes the program in front.
+ */
 export async function occupantForPane(
   pane: Pick<Pane, 'id' | 'tty'>,
-  marks: Record<string, string> = loadMarks(),
+  marks: Marks = loadMarks(),
+  ctx?: { allowExec: boolean },
 ): Promise<Occupant & { marked?: true }> {
-  return applyMarkToOccupant(await occupantForTty(pane.tty), marks[pane.id])
+  const out = await psTty(pane.tty)
+  if (out === null) return { kind: 'unknown', command: null }
+  const occ = classifyPs(out)
+  const mark = marks[pane.id]
+  if (!mark) return occ
+  const p = foregroundProcess(out)
+  const fg = p ? { pid: p.pid, command: p.command, start: mark.start?.length ? await processStart(p.pid) : null } : null
+  return applyMarkToOccupant(occ, mark, fg, ctx ?? { allowExec: readConfig().allowExec === true })
 }

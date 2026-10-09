@@ -43,6 +43,12 @@ export interface ScreenDef {
   idle?: RegExp[]
   /** interactive question dialogs (footer must close the screen, body nearby) */
   question?: { footer: RegExp; body: RegExp }
+  /**
+   * Extra gate for messages typed in from HQ (remote, unattended): must match
+   * the last non-empty lines, on top of the pane reading idle. For agents
+   * whose screen detection is not calibrated yet.
+   */
+  remoteReady?: { pattern: RegExp; refusal: string }
 }
 
 export interface AgentDef {
@@ -210,6 +216,14 @@ const DEVIN: AgentDef = {
     // the composer (`❭ …`, possibly wrapped) between two rules, then at most
     // one footer line, closes the screen
     idle: [/─{20,}\n❭[^\n]*(\n(?!─)[^\n]*){0,8}\n─{20,}(\n[^\n]*)?$/],
+    // Until busy detection is calibrated, HQ sends need the EMPTY composer:
+    // its placeholder is only shown when nothing is typed and no turn runs
+    // (verified on the live idle screen). While busy it reads "Guide Devin
+    // while it works" (binary string, unverified).
+    remoteReady: {
+      pattern: /─{20,}\n❭ Ask Devin to [^\n]*\n─{20,}(\n[^\n]*)?$/,
+      refusal: "Devin looks busy — try again when it's idle",
+    },
   },
   resume: {
     head: (bin, id) => [bin, '-r', id],
@@ -231,6 +245,47 @@ export const BUILTIN_AGENTS: readonly AgentDef[] = [CLAUDE, CODEX, DEVIN]
 // Config-defined agents (~/.termbus/agents.json)
 
 export const MAX_PATTERN_CHARS = 200
+
+/**
+ * Programs that are never an agent TUI: shells, interpreters and REPLs,
+ * remote shells, database clients, privilege/process wrappers, container
+ * tools, multiplexers, editors and pagers. Declaring (or marking) one as an
+ * agent would let HQ type into it — around the exec consent tiers.
+ */
+export const NEVER_AGENT_COMMANDS: ReadonlySet<string> = new Set([
+  // remote shells / transfer
+  'ssh', 'mosh', 'telnet', 'et', 'sftp', 'ftp', 'nc', 'ncat', 'netcat', 'scp', 'rsh',
+  // shells
+  'bash', 'zsh', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'nu', 'login',
+  // interpreters, package runners, REPLs
+  'python', 'python3', 'python2', 'pip', 'pip3', 'node', 'deno', 'bun', 'npx', 'npm', 'pnpm', 'yarn',
+  'ruby', 'irb', 'perl', 'php', 'lua', 'R', 'julia', 'osascript', 'swift',
+  // database clients
+  'psql', 'mysql', 'sqlite3', 'redis-cli', 'mongo', 'mongosh',
+  // privilege / process wrappers
+  'sudo', 'su', 'doas', 'env', 'nohup', 'time', 'xargs', 'exec', 'nice', 'caffeinate',
+  // containers / clusters
+  'docker', 'podman', 'kubectl',
+  // multiplexers
+  'tmux', 'screen',
+  // editors / pagers
+  'vim', 'nvim', 'vi', 'emacs', 'nano', 'less', 'more', 'man',
+])
+
+export function isNeverAgentCommand(command: string): boolean {
+  const first = command.trim().split(/\s+/)[0] ?? ''
+  const base = (first.split('/').pop() ?? first).replace(/^-/, '')
+  return NEVER_AGENT_COMMANDS.has(base) || /^python\d/.test(base)
+}
+
+/** Patterns prone to catastrophic backtracking, refused at load: a
+ *  quantified group that itself contains a quantifier ((a+)+, (x*y)*),
+ *  and backreferences. A heuristic — it errs on the side of refusing. */
+export function unsafePattern(src: string): string | null {
+  if (/\((?:[^()\\]|\\.)*(?:[*+?]|\{\d)(?:[^()\\]|\\.)*\)(?:[*+]|\{\d)/.test(src)) return 'nested quantifier'
+  if (/\\[1-9]|\\k</.test(src)) return 'backreference'
+  return null
+}
 const ID = /^[a-z][a-z0-9-]{1,31}$/
 const BASENAME = /^[A-Za-z0-9._+-]{1,64}$/
 
@@ -244,6 +299,8 @@ function compile(list: unknown, what: string): RegExp[] {
   return list.map((s) => {
     if (typeof s !== 'string' || !s) throw new Error(`${what} entries must be non-empty strings`)
     if (s.length > MAX_PATTERN_CHARS) throw new Error(`${what} pattern longer than ${MAX_PATTERN_CHARS} chars`)
+    const unsafe = unsafePattern(s)
+    if (unsafe) throw new Error(`${what} pattern /${s}/ has a ${unsafe} (could hang on a long screen)`)
     try {
       return new RegExp(s, 'm')
     } catch {
@@ -266,11 +323,16 @@ export function parseAgentEntry(raw: unknown, taken: Set<string>): AgentDef | { 
   if (!Array.isArray(e.commands) || e.commands.length === 0 || !e.commands.every((c) => typeof c === 'string' && BASENAME.test(c))) {
     return { error: `${where}: commands must be a non-empty list of process names (no paths)` }
   }
+  const never = (e.commands as string[]).filter((c) => isNeverAgentCommand(c))
+  if (never.length) return { error: `${where}: ${never.join(', ')} is a shell/interpreter/wrapper, not an agent TUI` }
   if (e.nativeQueue !== undefined && typeof e.nativeQueue !== 'boolean') return { error: `${where}: nativeQueue must be true or false` }
   try {
     const busy = compile(e.busy, `${where} busy`)
     const prompt = compile(e.prompt, `${where} prompt`)
-    const idle = e.idle === undefined ? undefined : compile(e.idle, `${where} idle`)
+    const idle = compile(e.idle, `${where} idle`)
+    // without positive idle chrome an unrecognised screen would read idle and
+    // be typed into; with it, anything unrecognised reads busy
+    if (idle.length === 0) return { error: `${where}: needs at least one "idle" pattern (the screen when it waits for input)` }
     return {
       id,
       label,
@@ -278,7 +340,7 @@ export function parseAgentEntry(raw: unknown, taken: Set<string>): AgentDef | { 
       builtin: false,
       transcript: 'screen',
       nativeQueue: e.nativeQueue === true,
-      screen: { busy, prompt, ...(idle && idle.length ? { idle } : {}) },
+      screen: { busy, prompt, idle },
     }
   } catch (err) {
     return { error: (err as Error).message }

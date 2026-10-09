@@ -71,7 +71,7 @@ describe('restore and the registry', () => {
 
   it('agents.json types are skipped with "no resume support"; devin restores', () => {
     const dir = mkdtempSync(join(tmpdir(), 'termbus-agents-'))
-    writeFileSync(join(dir, 'agents.json'), JSON.stringify([{ id: 'aider', commands: ['aider'] }]))
+    writeFileSync(join(dir, 'agents.json'), JSON.stringify([{ id: 'aider', commands: ['aider'], idle: ['^> ?$'] }]))
     process.env.TERMBUS_AGENTS_FILE = join(dir, 'agents.json')
     resetAgentRegistry()
     const plan = planRestore({ agents: [saved('aider', null, 1), saved('devin', ID, 2)] }, new Set())

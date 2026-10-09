@@ -9,6 +9,7 @@ import {
   DevinSessionSource,
   devinSessionForTui,
   discoverDevinSessions,
+  latestPerProcess,
   liveDevinLocks,
   mainChain,
   mapDevinNode,
@@ -174,6 +175,48 @@ describe('DevinSessionSource', () => {
     expect(ev.map((e) => [e.kind, e.seq, e.epoch])).toEqual([['user_msg', 0, 1]])
     expect(src.getState()).toEqual({ offset: 1, epoch: 1, lineNo: 0 })
   })
+  const seqs = (ev: Array<{ seq: number; epoch: number }>) => [...new Set(ev.map((e) => `${e.seq}@${e.epoch}`))]
+  it('compaction re-roots the chain → the new chain is re-emitted under a new epoch', async () => {
+    const q = memoryQuery()
+    q.rows.set(0, { parent: null, msg: SYSTEM })
+    q.rows.set(3, { parent: 0, msg: USER })
+    q.leaf = 3
+    const src = new DevinSessionSource(INFO, { query: q })
+    expect(seqs(await src.poll())).toEqual(['3@0'])
+    // real shape: compaction copies the prefix under a new root (21 → 28 = copy of 3)
+    q.rows.set(21, { parent: null, msg: SYSTEM })
+    q.rows.set(28, { parent: 21, msg: USER })
+    q.rows.set(31, { parent: 28, msg: ASSISTANT_FINAL })
+    q.leaf = 31
+    expect(seqs(await src.poll())).toEqual(['28@1', '31@1'])
+  })
+  it('a draft leaf replaced by its committed sibling → re-emitted, not appended twice', async () => {
+    const q = memoryQuery()
+    q.rows.set(0, { parent: null, msg: USER })
+    q.rows.set(1, { parent: 0, msg: ASSISTANT_FINAL }) // draft
+    q.leaf = 1
+    const src = new DevinSessionSource(INFO, { query: q })
+    expect(seqs(await src.poll())).toEqual(['0@0', '1@0'])
+    q.rows.set(2, { parent: 0, msg: ASSISTANT_FINAL }) // committed sibling
+    q.leaf = 2
+    expect(seqs(await src.poll())).toEqual(['0@1', '2@1'])
+    // and a plain append after that stays in the same epoch
+    q.rows.set(3, { parent: 2, msg: USER })
+    q.leaf = 3
+    expect(seqs(await src.poll())).toEqual(['3@1'])
+  })
+  it('a rewind to a newer branch point (leaf ahead of the cursor, other branch) → re-emitted', async () => {
+    const q = memoryQuery()
+    q.rows.set(0, { parent: null, msg: USER })
+    q.rows.set(1, { parent: 0, msg: ASSISTANT_FINAL })
+    q.rows.set(2, { parent: 1, msg: USER })
+    q.leaf = 2
+    const src = new DevinSessionSource(INFO, { query: q })
+    await src.poll()
+    q.rows.set(3, { parent: 0, msg: USER }) // user rewound to 0 and typed again
+    q.leaf = 3
+    expect(seqs(await src.poll())).toEqual(['0@1', '3@1'])
+  })
   it('a row missing mid-read stops there and is retried', async () => {
     const q = memoryQuery()
     q.rows.set(0, { parent: null, msg: USER })
@@ -185,6 +228,29 @@ describe('DevinSessionSource', () => {
     expect((await src.poll()).map((e) => e.seq)).toEqual([0])
     q.messages = realMessages
     expect((await src.poll()).map((e) => e.kind)).toEqual(['thinking', 'assistant_msg', 'turn_done'])
+  })
+})
+
+describe('lock hygiene', () => {
+  it('an orphaned acp (its TUI is gone) is not a live session', () => {
+    const procs = parsePsProcs(` 42698     1 ttys006  /Users/u/.local/bin/devin acp
+ 50000 49999 ttys007  bash
+ 50001 50000 ttys007  /Users/u/.local/bin/devin acp`)
+    expect(liveDevinLocks([{ sessionId: 'a-b', pid: 42698 }, { sessionId: 'c-d', pid: 50001 }], procs)).toEqual([])
+  })
+  it('several locks on one acp: the most recently active session wins', () => {
+    const procs = parsePsProcs(` 11405 11400 ttys006  devin
+ 42698 11405 ttys006  /Users/u/.local/bin/devin acp`)
+    const locks = [
+      { sessionId: 'old-session', pid: 42698 },
+      { sessionId: 'new-session', pid: 42698 },
+      { sessionId: 'no-row-yet', pid: 42698 },
+    ]
+    const at: Record<string, number | null> = { 'old-session': 1000, 'new-session': 2000, 'no-row-yet': null }
+    expect(latestPerProcess(liveDevinLocks(locks, procs), (id) => at[id]).map((l) => l.sessionId)).toEqual(['new-session'])
+    expect(devinSessionForTui(11405, procs, locks, (id) => at[id])).toBe('new-session')
+    // nothing known about activity: deterministic (first id)
+    expect(devinSessionForTui(11405, procs, locks)).toBe('new-session')
   })
 })
 
@@ -275,6 +341,25 @@ describe.skipIf(!sqliteAvailable)('against a real SQLite file (sqlite3 CLI, read
       ['tool_result', 3, 0],
     ])
     expect(await src.poll()).toEqual([])
+  })
+  it('ignores the user\'s ~/.sqliterc (-init /dev/null)', async () => {
+    const root = makeRoot()
+    const home = mkdtempSync(join(tmpdir(), 'termbus-home-'))
+    // an rc file that prints would corrupt the JSON on stdout
+    const rc = '.print junk from sqliterc\n'
+    writeFileSync(join(home, '.sqliterc'), rc)
+    mkdirSync(join(home, '.config', 'sqlite3'), { recursive: true })
+    writeFileSync(join(home, '.config', 'sqlite3', 'sqliterc'), rc)
+    const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME }
+    process.env.HOME = home
+    process.env.XDG_CONFIG_HOME = join(home, '.config')
+    try {
+      expect(await sqliteDevinQuery(join(root, 'sessions.db')).head('adaptive-hardcover')).toMatchObject({ leaf: 3 })
+    } finally {
+      process.env.HOME = saved.HOME
+      if (saved.XDG_CONFIG_HOME === undefined) delete process.env.XDG_CONFIG_HOME
+      else process.env.XDG_CONFIG_HOME = saved.XDG_CONFIG_HOME
+    }
   })
   it('refuses session ids that are not plain words', async () => {
     const q = sqliteDevinQuery(join(makeRoot(), 'sessions.db'))

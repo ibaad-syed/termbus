@@ -4,7 +4,8 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import type { AgentKind } from '../core/types.js'
-import { devinSessionForTui, psProcs, readDevinLocks } from '../transcripts/devin.js'
+import { processStart } from '../core/occupant.js'
+import { devinRoot, devinSessionForTui, psProcs, readDevinLocks, sqliteDevinQuery } from '../transcripts/devin.js'
 
 const execFileP = promisify(execFile)
 
@@ -54,19 +55,7 @@ export function codexMainThread(
   return { sessionId: top.meta.id as string, cwd: typeof top.meta.cwd === 'string' ? top.meta.cwd : null }
 }
 
-/** The process start time as ps renders it, in UTC and in local time. */
-async function procStartOf(pid: number): Promise<string[] | null> {
-  const out: string[] = []
-  for (const env of [{ ...process.env, TZ: 'UTC' }, process.env]) {
-    try {
-      const { stdout } = await execFileP('ps', ['-o', 'lstart=', '-p', String(pid)], { env })
-      if (stdout.trim()) out.push(stdout.trim())
-    } catch {
-      // process gone
-    }
-  }
-  return out.length > 0 ? out : null
-}
+const procStartOf = processStart
 
 async function processCwd(pid: number): Promise<string | null> {
   try {
@@ -132,7 +121,17 @@ export async function probeAgentIdentity(
   if (kind === 'devin') {
     // the TUI's `devin acp` child holds session_locks/<id>.lock (its pid inside)
     try {
-      const id = devinSessionForTui(pid, await psProcs(), await readDevinLocks(opts.devinRoot))
+      const root = opts.devinRoot ?? devinRoot()
+      const locks = await readDevinLocks(root)
+      const procs = await psProcs()
+      // several locks on one acp process: the most recently active session wins
+      const q = sqliteDevinQuery(join(root, 'sessions.db'))
+      const activity = new Map<string, number | null>()
+      for (const l of locks) {
+        if (!procs.some((p) => p.pid === l.pid && p.ppid === pid)) continue
+        activity.set(l.sessionId, await q.head(l.sessionId).then((h) => h?.lastActivityMs ?? null, () => null))
+      }
+      const id = devinSessionForTui(pid, procs, locks, (s) => activity.get(s))
       if (id) found = { sessionId: id, cwd: null }
     } catch {
       // ps failed: identity unknown

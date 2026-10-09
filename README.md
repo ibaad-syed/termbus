@@ -36,7 +36,7 @@ Or don't type any of this — after `install-skill`, just tell your Claude:
 - **Never interrupts by default.** Busy agents refuse messages unless you choose: `--queue` (their native input queue — they see it mid-turn), `--wait` (deliver when idle), or `--force`.
 - **Agents know who's talking.** Messages carry a sender envelope (`[termbus-msg v=1 from=w1.t1.p2 kind=claude …]`) so a receiving agent can reply to the right pane — and never mistakes a peer for its human.
 - **Works across models.** Claude Code, Codex, Devin CLI, plain shells, dev servers — one interface. Any other agent TUI is a few regexes in `~/.termbus/agents.json` (below).
-- **Devin CLI is supported** — detection, messaging, HQ transcripts, restore (`devin -r <session>`). Its state detection is preliminary: only the idle screen is confirmed so far, so a Devin screen termbus doesn't recognize reads as busy and is never typed into without `--wait`/`--force`.
+- **Devin CLI is supported** — detection, messaging, HQ transcripts, restore (`devin -r <session>`). Its state detection is preliminary: only the idle screen is confirmed so far, so a Devin screen termbus doesn't recognize reads as busy and is never typed into without `--wait`/`--force`; messages from HQ are typed only into an idle, empty Devin composer.
 
 ## Departments and broadcast
 
@@ -64,7 +64,7 @@ Claude Code, Codex and Devin are built in. Declare any other agent TUI in `~/.te
 ]
 ```
 
-- `id`: lowercase, 2–32 chars (`a-z`, digits, `-`), not a built-in; `commands`: process names (no paths); `busy` / `prompt` / `idle`: regex strings (≤ 200 chars) matched against the bottom of the screen (`idle` sees the last non-empty lines, right-trimmed — set it and any screen that's neither busy, a prompt, nor idle reads as busy); `nativeQueue`: the TUI accepts messages mid-turn (default false: busy panes refuse, use `--wait`).
+- `id`: lowercase, 2–32 chars (`a-z`, digits, `-`), not a built-in; `commands`: process names (no paths) — shells, interpreters, remote shells, database clients, `sudo`/`env`-style wrappers, containers, multiplexers and editors (`ssh`, `bash`, `python`, `node`, `psql`, `sudo`, `docker`, `tmux`, `vim`…) are refused; `busy` / `prompt` / `idle`: regex strings (≤ 200 chars, no nested quantifiers or backreferences) matched against the bottom of the screen; `idle` is **required** (it sees the last non-empty lines, right-trimmed) — any screen that's neither busy, a prompt, nor idle reads as busy; `nativeQueue`: the TUI accepts messages mid-turn (default false: busy panes refuse, use `--wait`).
 - These agents get the full CLI (`list`, `send`, `ask`, `broadcast`, `watch`, departments, HQ chat via its screen view). No transcripts, question cards or restore — `restore` lists them as skipped (no resume support) and reopens their pane as a shell.
 - Invalid entries are skipped with a one-line warning; termbus never fails because of this file.
 
@@ -75,7 +75,7 @@ termbus mark w1.t2.p1 devin      # any built-in or agents.json kind
 termbus unmark w1.t2.p1          # back to automatic detection
 ```
 
-Marks live in `~/.termbus/marks.json` (`TERMBUS_MARKS_FILE`), win over process detection while a program runs in the pane (once it exits the pane is a shell again, so text is never typed into a bare prompt), show as `kind*` in `termbus list` (`"marked": true` in `--json`), follow panes through `termbus restore`, and can be set from HQ — by you only (never the Conductor), and only if this Mac allows it with `termbus bridge --allow-exec`, since a marked pane receives HQ messages; unmarking from HQ always works.
+A mark is bound to the program it was made on (pid + start time): it wins over process detection only while that program runs, so once it exits — or the pane runs something else — the mark stops applying and nothing meant for the agent is typed into whatever replaced it. Marking a shell, `ssh`, a REPL or an editor needs `--force`. Marks live in `~/.termbus/marks.json` (`TERMBUS_MARKS_FILE`), show as `kind*` in `termbus list` (`"marked": true` in `--json`), follow panes through `termbus restore`, and can be set from HQ — by you only (never the Conductor), never on a shell/ssh/REPL pane, and only while this Mac allows it with `termbus bridge --allow-exec` (withdrawing that consent also disables HQ-made marks), since a marked pane receives HQ messages; unmarking from HQ always works.
 
 ## Survive a restart
 
@@ -132,7 +132,7 @@ That installs a launchd service (runs at login, restarts automatically) streamin
 
 Commands run in the background (never in a pane), inside your home directory, with timeouts, and with credentials redacted from their output.
 
-Messages you type in HQ reach agents as `from=hq` (you); messages the Conductor writes arrive as `from=conductor`, and the installed skill tells agents it is an AI acting for you — fine for normal work, but not your authorization for destructive or irreversible actions, secrets, publishing, or permission changes.
+Messages you type in HQ reach agents as `from=hq` (you); messages the Conductor writes — including the first task of a pane it opens — arrive as `from=conductor`, and only you (not the Conductor) can approve, reject or answer an agent's prompt from HQ; the installed skill tells agents the Conductor is an AI acting for you — fine for normal work, but not your authorization for destructive or irreversible actions, secrets, publishing, or permission changes.
 
 > HQ is a self-hosted Next.js + Postgres app (Vercel + Neon free tiers). It's in early access — [open an issue](https://github.com/ibaad-syed/termbus/issues) if you'd like access or the deploy guide.
 

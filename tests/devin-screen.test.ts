@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { agentScreenState, looksLikeQuestionDialog } from '../src/core/idle.js'
+import { agentScreenState, looksLikeQuestionDialog, remoteSendRefusal } from '../src/core/idle.js'
 import { paneState } from '../src/core/delivery.js'
 import {
   DEVIN_BUSY_SYNTH,
@@ -37,5 +37,26 @@ describe('Devin screen state', () => {
   it('the placeholder "❭ 1." in a typed draft is not an option list', () => {
     const draft = DEVIN_IDLE_REAL.replace('❭ Ask Devin to build features, fix bugs, or work on your code', '❭ 1. fix the bug')
     expect(agentScreenState('devin', draft)).toBe('idle')
+  })
+  it('"Guide Devin while it works" alone reads busy (local sends need --wait)', () => {
+    expect(agentScreenState('devin', DEVIN_IDLE_REAL.replace('Ask Devin to build features, fix bugs, or work on your code', 'Guide Devin while it works'))).toBe('busy')
+  })
+})
+
+describe('HQ sends to Devin (remote gate, until calibrated)', () => {
+  const REFUSAL = "Devin looks busy — try again when it's idle"
+  it('only an idle, EMPTY composer (placeholder "Ask Devin to …" visible) is typed into', () => {
+    expect(remoteSendRefusal('devin', DEVIN_IDLE_REAL)).toBeNull()
+  })
+  it('anything else is refused', () => {
+    expect(remoteSendRefusal('devin', DEVIN_BUSY_SYNTH)).toBe(REFUSAL)
+    expect(remoteSendRefusal('devin', DEVIN_IDLE_AFTER_TURN)).toBe(REFUSAL) // a draft in the composer
+    expect(remoteSendRefusal('devin', DEVIN_PERMISSION_SYNTH)).toBe(REFUSAL)
+    expect(remoteSendRefusal('devin', DEVIN_UNKNOWN)).toBe(REFUSAL)
+    expect(remoteSendRefusal('devin', DEVIN_IDLE_REAL.replace('Ask Devin to build features, fix bugs, or work on your code', 'Guide Devin while it works'))).toBe(REFUSAL)
+  })
+  it('claude and codex have no extra gate', () => {
+    expect(remoteSendRefusal('claude', 'anything')).toBeNull()
+    expect(remoteSendRefusal('codex', 'anything')).toBeNull()
   })
 })

@@ -81,31 +81,57 @@ describe('agents.json (config-defined agent types)', () => {
   it('validates entries; bad ones are skipped with a one-line warning each', () => {
     const { agents, warnings } = parseAgentsFile(
       JSON.stringify([
-        { id: 'aider', label: 'Aider', commands: ['aider'], busy: ['Waiting for'], prompt: ['\\(Y\\)es/\\(N\\)o'] },
+        { id: 'aider', label: 'Aider', commands: ['aider'], busy: ['Waiting for'], prompt: ['\\(Y\\)es/\\(N\\)o'], idle: ['^> ?$'] },
         { id: 'claude', commands: ['x'] }, // built in
         { id: 'Bad Id', commands: ['x'] },
         { id: 'nocmd', commands: [] },
         { id: 'pathcmd', commands: ['/usr/bin/x'] },
         { id: 'badre', commands: ['x'], busy: ['(unclosed'] },
         { id: 'longre', commands: ['x'], busy: ['a'.repeat(201)] },
-        { id: 'aider', commands: ['aider2'] }, // duplicate
+        { id: 'aider', commands: ['aider2'], idle: ['x'] }, // duplicate
         { id: 'shell', commands: ['x'] }, // reserved
         'nope',
       ]),
     )
     expect(agents.map((a) => a.id)).toEqual(['aider'])
     expect(warnings).toHaveLength(9)
+    expect(warnings.join('\n')).toMatch(/defined twice/)
     for (const w of warnings) expect(w).not.toContain('\n')
     expect(agents[0]).toMatchObject({ label: 'Aider', transcript: 'screen', nativeQueue: false, builtin: false })
     expect(agents[0].resume).toBeUndefined()
     expect(agents[0].screen.question).toBeUndefined()
+  })
+  it('every entry needs at least one idle pattern (unknown screens must read busy)', () => {
+    const { agents, warnings } = parseAgentsFile(JSON.stringify([{ id: 'aider', commands: ['aider'], busy: ['x'] }, { id: 'goose', commands: ['goose'], idle: [] }]))
+    expect(agents).toEqual([])
+    expect(warnings).toHaveLength(2)
+    for (const w of warnings) expect(w).toMatch(/needs at least one "idle" pattern/)
+  })
+  it('refuses shells, interpreters, remote shells, wrappers, multiplexers and editors as agent commands', () => {
+    const never = 'ssh mosh telnet et sftp ftp nc bash zsh sh fish dash ksh tcsh csh nu python python3 python2 pip node deno bun npx ruby irb perl php lua R julia psql mysql sqlite3 redis-cli mongo mongosh sudo su doas env nohup time xargs docker podman kubectl tmux screen vim nvim vi emacs nano less more man'.split(' ')
+    for (const c of never) {
+      const r = parseAgentsFile(JSON.stringify([{ id: 'sneaky', commands: ['aider', c], idle: ['x'] }]))
+      expect(r.agents, c).toEqual([])
+      expect(r.warnings[0]).toMatch(/not an agent TUI/)
+    }
+    expect(parseAgentsFile(JSON.stringify([{ id: 'py', commands: ['python3.12'], idle: ['x'] }])).agents).toEqual([])
+  })
+  it('refuses regexes that could backtrack catastrophically, and backreferences', () => {
+    for (const re of ['(a+)+$', '(x*y)*', '(\\w+\\s?)+$', '(a?){20}', '(.)\\1', '(?<q>.)\\k<q>']) {
+      const r = parseAgentsFile(JSON.stringify([{ id: 'redos', commands: ['x'], busy: [re], idle: ['ok'] }]))
+      expect(r.agents, re).toEqual([])
+      expect(r.warnings[0]).toMatch(/nested quantifier|backreference/)
+    }
+    // ordinary patterns, quantified groups without inner quantifiers, are fine
+    const fine = parseAgentsFile(JSON.stringify([{ id: 'okre', commands: ['x'], busy: ['(ab)+', 'Working( on)? it', '\\(Y\\)es'], idle: ['^> ?$'] }]))
+    expect(fine.warnings).toEqual([])
   })
   it('a file that is not a JSON array is ignored, never a crash', () => {
     expect(parseAgentsFile('{oops').agents).toEqual([])
     expect(parseAgentsFile('{"id":"x"}').warnings[0]).toMatch(/array/)
   })
   it('loads from TERMBUS_AGENTS_FILE and drives detection, state and delivery', async () => {
-    useAgentsFile([{ id: 'aider', label: 'Aider', commands: ['aider'], busy: ['Waiting for'], prompt: ['\\(Y\\)es/\\(N\\)o'] }])
+    useAgentsFile([{ id: 'aider', label: 'Aider', commands: ['aider'], busy: ['Waiting for'], prompt: ['\\(Y\\)es/\\(N\\)o'], idle: ['^> ?$'] }])
     expect(isAgentKind('aider')).toBe(true)
     expect(agentDef('aider')?.label).toBe('Aider')
     expect(classifyPs('100 1 Ss -zsh\n200 100 S+ aider --model x')).toEqual({ kind: 'aider', command: 'aider --model x' })

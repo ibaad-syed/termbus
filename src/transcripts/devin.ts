@@ -152,7 +152,8 @@ export interface DevinQuery {
 
 export async function sqliteJson(dbPath: string, sql: string): Promise<any[]> {
   const uri = `file:${encodeURI(dbPath).replace(/\?/g, '%3F').replace(/#/g, '%23')}?mode=ro`
-  const { stdout } = await execFileP('sqlite3', ['-readonly', '-json', uri, sql], { maxBuffer: 64 * 1024 * 1024, timeout: 15_000 })
+  // -init /dev/null: never run the user's ~/.sqliterc; -batch: no interactive behaviour
+  const { stdout } = await execFileP('sqlite3', ['-init', '/dev/null', '-batch', '-readonly', '-json', uri, sql], { maxBuffer: 64 * 1024 * 1024, timeout: 15_000 })
   const t = stdout.trim()
   return t ? (JSON.parse(t) as any[]) : []
 }
@@ -190,17 +191,22 @@ export function sqliteDevinQuery(dbPath: string, run: (db: string, sql: string) 
 
 /**
  * Incremental reader for one Devin session, pollable like a SessionTailer.
- * State: `offset` = the next node_id to emit (node ids only grow), so a
- * restored source resumes exactly; `lineNo` is unused (0).
+ * State: `offset` = one past the last node_id emitted, so a source restored
+ * after a bridge restart resumes where it stopped; `lineNo` is unused (0).
  *
- * If the leaf moves BEHIND the cursor (the conversation was rewound), the
- * chain is re-emitted from the root under a new epoch. A branch that diverges
- * without rewinding (a new leaf whose ids are all newer) just appends.
+ * Within a process it also remembers the chain it has emitted. The new main
+ * chain must EXTEND that chain; anything else — compaction re-rooting the
+ * conversation, a draft node replaced by its committed sibling, a rewind —
+ * re-emits the whole new chain under a new epoch, so HQ never shows a mix of
+ * two branches. (After a restart, with no chain in memory: a leaf behind the
+ * cursor is a rewind; otherwise nodes past the cursor are appended.)
  */
 export class DevinSessionSource {
   private offset: number
   private epoch: number
   private lastLeaf: number | null = null
+  /** the chain emitted so far (root first), null until the first poll */
+  private emitted: number[] | null = null
   private ctx: DevinParseContext
 
   constructor(
@@ -220,30 +226,47 @@ export class DevinSessionSource {
     return { offset: this.offset, epoch: this.epoch, lineNo: 0 }
   }
 
+  private restart(): void {
+    this.epoch++
+    this.offset = 0
+    this.ctx = createDevinContext(this.info.sessionId)
+  }
+
   async poll(): Promise<TranscriptEvent[]> {
     const q = this.query
     const head = await q.head(this.info.sessionId)
     if (!head || head.leaf === null || head.leaf === this.lastLeaf) return []
-    if (head.leaf + 1 < this.offset) {
-      this.offset = 0
-      this.epoch++
-      this.ctx = createDevinContext(this.info.sessionId)
-    }
     const chain = mainChain(await q.nodes(this.info.sessionId), head.leaf)
-    const fresh = chain.filter((id) => id >= this.offset)
-    if (fresh.length === 0) {
-      this.lastLeaf = head.leaf
-      return []
+    if (chain.length === 0) return [] // leaf row not written yet
+    let start: number // index in `chain` of the first node to emit
+    if (this.emitted) {
+      const prev = this.emitted
+      const extends_ = prev.length <= chain.length && prev.every((id, i) => chain[i] === id)
+      if (extends_) start = prev.length
+      else {
+        this.restart()
+        start = 0
+      }
+    } else if (head.leaf + 1 < this.offset) {
+      this.restart() // rewound while we weren't watching
+      start = 0
+    } else {
+      start = chain.findIndex((id) => id >= this.offset)
+      if (start === -1) start = chain.length
     }
-    const rows = new Map((await q.messages(this.info.sessionId, fresh)).map((r) => [r.node_id, r]))
+    const fresh = chain.slice(start)
+    const rows = fresh.length ? new Map((await q.messages(this.info.sessionId, fresh)).map((r) => [r.node_id, r])) : new Map()
     const events: TranscriptEvent[] = []
+    let done = start // chain[0..done) is emitted
     for (const id of fresh) {
       const row = rows.get(id)
-      if (!row) return events // vanished mid-read: the rest is retried next poll
+      if (!row) break // vanished mid-read: the rest is retried next poll
       for (const ev of mapDevinNode(row, this.ctx)) events.push({ ...ev, epoch: this.epoch })
-      this.offset = id + 1
+      this.offset = Math.max(this.offset, id + 1)
+      done++
     }
-    this.lastLeaf = head.leaf
+    this.emitted = chain.slice(0, done)
+    if (done === chain.length) this.lastLeaf = head.leaf
     return events
   }
 }
@@ -294,9 +317,15 @@ export async function readDevinLocks(root = devinRoot()): Promise<Array<{ sessio
   return out
 }
 
+const isDevinTui = (command: string) => {
+  const [bin = '', sub] = command.trim().split(/\s+/)
+  return bin.split('/').pop() === 'devin' && sub !== 'acp'
+}
+
 /**
  * Live sessions: a lock whose pid is a running `devin acp` (not merely any
- * live pid — pids get reused). Linked to the pane by that process's tty.
+ * live pid — pids get reused) whose parent is a live Devin TUI (an orphaned
+ * acp server has no pane). Linked to the pane by that process's tty.
  */
 export function liveDevinLocks(
   locks: Array<{ sessionId: string; pid: number }>,
@@ -306,8 +335,28 @@ export function liveDevinLocks(
   return locks.flatMap((l) => {
     const p = byPid.get(l.pid)
     if (!p || !isDevinAcp(p.command)) return []
+    const parent = byPid.get(p.ppid)
+    if (!parent || !isDevinTui(parent.command)) return []
     return [{ ...l, tty: p.tty === '??' || p.tty === '-' ? null : p.tty.replace(/^\/dev\//, '') }]
   })
+}
+
+/**
+ * Several locks naming the same acp process (a session switched with stale
+ * locks left behind): keep, per process, the session with the latest
+ * last_activity_at (unknown activity loses; ties go to the first id).
+ */
+export function latestPerProcess<T extends { sessionId: string; pid: number }>(
+  locks: T[],
+  activityMs: (sessionId: string) => number | null | undefined,
+): T[] {
+  const best = new Map<number, { lock: T; at: number }>()
+  for (const l of [...locks].sort((a, b) => a.sessionId.localeCompare(b.sessionId))) {
+    const at = activityMs(l.sessionId) ?? -Infinity
+    const cur = best.get(l.pid)
+    if (!cur || at > cur.at) best.set(l.pid, { lock: l, at })
+  }
+  return locks.filter((l) => best.get(l.pid)?.lock === l)
 }
 
 /** The session a Devin TUI (pid) is serving: via its `devin acp` child's lock. */
@@ -315,9 +364,15 @@ export function devinSessionForTui(
   tuiPid: number,
   procs: PsProc[],
   locks: Array<{ sessionId: string; pid: number }>,
+  activityMs: (sessionId: string) => number | null | undefined = () => null,
 ): string | null {
   const acps = new Set(procs.filter((p) => p.ppid === tuiPid && isDevinAcp(p.command)).map((p) => p.pid))
-  return locks.find((l) => acps.has(l.pid))?.sessionId ?? null
+  const mine = locks.filter((l) => acps.has(l.pid))
+  if (mine.length === 0) return null
+  const ranked = [...mine].sort(
+    (a, b) => (activityMs(b.sessionId) ?? -Infinity) - (activityMs(a.sessionId) ?? -Infinity) || a.sessionId.localeCompare(b.sessionId),
+  )
+  return ranked[0].sessionId
 }
 
 export async function psProcs(): Promise<PsProc[]> {
@@ -339,14 +394,19 @@ export async function discoverDevinSessions(
   }
   const path = join(root, 'sessions.db')
   const query = opts.query ?? sqliteDevinQuery(path)
-  const out: SessionInfo[] = []
-  for (const l of liveDevinLocks(locks, procs)) {
-    let head: DevinHead | null = null
+  const live = liveDevinLocks(locks, procs)
+  const heads = new Map<string, DevinHead | null>()
+  for (const l of live) {
     try {
-      head = await query.head(l.sessionId)
+      heads.set(l.sessionId, await query.head(l.sessionId))
     } catch {
       // no sqlite3, db busy/missing: still a live session, just without cwd
+      heads.set(l.sessionId, null)
     }
+  }
+  const out: SessionInfo[] = []
+  for (const l of latestPerProcess(live, (id) => heads.get(id)?.lastActivityMs)) {
+    const head = heads.get(l.sessionId) ?? null
     out.push({
       agent: 'devin',
       sessionId: l.sessionId,

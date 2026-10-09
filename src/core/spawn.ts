@@ -68,8 +68,10 @@ export function parseSpawnRequest(
  *  prefixed — as a bare first argument it could parse as an option
  *  (`--yolo`), a subcommand (`update`, `logout`, `exec`), or a slash/bang
  *  command (`/…`, `!…`). "Task: …" is always just text. */
-export function spawnShellLine(req: SpawnRequest): string {
-  const prompt = req.prompt ? `Task: ${req.prompt.trimStart()}` : null
+export function spawnShellLine(req: SpawnRequest, envelope?: string): string {
+  // spawns are requested by HQ's Conductor: its sender envelope goes in front
+  // (it starts with "[", so it can't parse as a flag or command either)
+  const prompt = req.prompt ? `${envelope ? `${envelope} ` : ''}Task: ${req.prompt.trimStart()}` : null
   const argv = [req.agent, ...(prompt ? [prompt] : [])]
   return `cd ${shellQuote(req.cwd)} && ${argv.map(shellQuote).join(' ')}`
 }

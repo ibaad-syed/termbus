@@ -8,6 +8,7 @@ export default defineConfig({
     env: {
       TERMBUS_AGENTS_FILE: '/nonexistent/termbus-tests/agents.json',
       TERMBUS_MARKS_FILE: '/nonexistent/termbus-tests/marks.json',
+      TERMBUS_CONFIG_FILE: '/nonexistent/termbus-tests/config.json',
     },
   },
 })

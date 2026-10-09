@@ -17,11 +17,12 @@ import { parseSpawnRequest, SPAWN_LIMIT, SPAWN_WINDOW_MS, SpawnLimiter, spawnShe
 import { launchScript } from '../restore/resume-command.js'
 import { buildEnvelope, envelopeId } from '../core/envelope.js'
 import { TermbusError } from '../core/errors.js'
-import { agentProcessForTty, occupantForPane } from '../core/occupant.js'
+import { agentProcessForTty, foregroundForTty, occupantForPane } from '../core/occupant.js'
 import { probeAgentIdentity } from '../restore/identity.js'
 import { agentLabel } from '../core/agents.js'
-import { applyMark, loadMarks, marksFile, updateMarks } from '../core/marks.js'
-import { looksLikeQuestionDialog } from '../core/idle.js'
+import { configFile, readConfig, type BridgeConfig } from '../core/config.js'
+import { loadMarks, markPane, marksFile, unmarkPane, updateMarks, type ForegroundProc } from '../core/marks.js'
+import { looksLikeQuestionDialog, remoteSendRefusal } from '../core/idle.js'
 import { executeScreenAnswer, parseClaudeQuestionScreen, SCREEN_CALL_PREFIX, type ScreenAnswer } from '../core/claude-question-screen.js'
 import { planAnswerSteps, runAnswerSteps, validateAnswers, verifyFreshDialog, type QuestionAnswer } from '../core/question.js'
 import { applySnapshots, diffStates, type WatchSnapshot } from '../core/watch.js'
@@ -40,27 +41,11 @@ const USAGE =
   '  --allow-auto-exec / --no-auto-exec\n' +
   '               also let HQ\'s "Full auto" setting run commands without a tap (off by default)'
 
-const CONFIG_FILE = join(homedir(), '.termbus', 'config.json')
+const CONFIG_FILE = configFile()
 const PLIST_LABEL = 'com.termbus.bridge'
 const PLIST_FILE = join(homedir(), 'Library', 'LaunchAgents', `${PLIST_LABEL}.plist`)
 const execFileAsync = promisify(execFile)
 
-interface BridgeConfig {
-  relay?: string
-  secret?: string
-  /** this Mac's local consent to run commands the user approves in HQ */
-  allowExec?: boolean
-  /** this Mac's local consent for HQ's "Full auto" commands (implies allowExec) */
-  allowAutoExec?: boolean
-}
-
-function readConfig(): BridgeConfig {
-  try {
-    return JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) as BridgeConfig
-  } catch {
-    return {}
-  }
-}
 
 function writeConfig(cfg: BridgeConfig): void {
   mkdirSync(join(homedir(), '.termbus'), { recursive: true })
@@ -107,6 +92,14 @@ interface HqAction {
  */
 export function hqSenderLabel(origin: unknown): 'hq' | 'conductor' {
   return origin === undefined || origin === null || origin === 'user' ? 'hq' : 'conductor'
+}
+
+/** Answering an agent's prompt is the user's call: the Conductor may not approve, reject or answer. */
+export function conductorRefusal(action: Pick<HqAction, 'kind' | 'origin'>): { status: string; outcome: string } | null {
+  if ((action.kind === 'approve' || action.kind === 'reject' || action.kind === 'answer') && hqSenderLabel(action.origin) === 'conductor') {
+    return { status: 'failed', outcome: `only the user can ${action.kind} from HQ, not the Conductor` }
+  }
+  return null
 }
 
 type SyncSnapshot = WatchSnapshot & { occupant: string; agent: boolean; agentLabel: string | null; marked: boolean; screen?: string }
@@ -215,7 +208,8 @@ export async function executeSpawn(
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   const script = join(dir, `spawn-${action.id}.sh`)
   const shell = userInfo().shell || process.env.SHELL || '/bin/zsh'
-  writeFileSync(script, launchScript(shell, spawnShellLine(req)), { mode: 0o700 })
+  const envelope = buildEnvelope({ label: 'conductor', kind: 'shell' }, envelopeId())
+  writeFileSync(script, launchScript(shell, spawnShellLine(req, envelope)), { mode: 0o700 })
   chmodSync(script, 0o700)
   const command = /\s/.test(script) ? `"${script}"` : script
   const anchorAlive = ctx.anchorPaneId !== null && (await backend.listPanes()).some((p) => p.id === ctx.anchorPaneId)
@@ -239,7 +233,8 @@ export const MARK_NEEDS_EXEC = 'marking panes from HQ needs `termbus bridge --al
 
 export function executeMark(
   action: Pick<HqAction, 'paneId' | 'payload' | 'origin'>,
-  openPaneIds: string[],
+  /** the pane's foreground program; undefined = the pane is not open */
+  fg: ForegroundProc | null | undefined,
   consent: { allowExec: boolean },
   path = marksFile(),
 ): { status: string; outcome?: string } {
@@ -256,13 +251,13 @@ export function executeMark(
   try {
     if (kind === null) {
       if (!(paneId in loadMarks(path))) return { status: 'failed', outcome: 'this pane was detected automatically, not marked' }
-      updateMarks((m) => applyMark(m, paneId, null), path)
+      updateMarks((m) => unmarkPane(m, paneId), path)
       return { status: 'done', outcome: 'unmarked' }
     }
     if (hqSenderLabel(action.origin) !== 'hq') return { status: 'failed', outcome: 'only the user can mark panes from HQ, not the Conductor' }
     if (!consent.allowExec) return { status: 'failed', outcome: MARK_NEEDS_EXEC }
-    if (!openPaneIds.includes(paneId)) return { status: 'failed', outcome: 'pane no longer exists' }
-    updateMarks((m) => applyMark(m, paneId, kind), path)
+    if (fg === undefined) return { status: 'failed', outcome: 'pane no longer exists' }
+    updateMarks((m) => markPane(m, paneId, kind, fg, { remote: true }), path)
     return { status: 'done', outcome: `marked as ${kind}` }
   } catch (e) {
     return { status: 'failed', outcome: e instanceof Error ? e.message : String(e) }
@@ -338,6 +333,8 @@ async function executeAction(
   feeder: TranscriptFeeder | null = null,
   spawnCtx: SpawnContext | null = null,
 ): Promise<{ status: string; outcome?: string }> {
+  const refused = conductorRefusal(action)
+  if (refused) return refused
   if (action.kind === 'spawn') {
     return spawnCtx ? executeSpawn(backend, action, spawnCtx) : { status: 'failed', outcome: 'spawning is not enabled' }
   }
@@ -345,7 +342,8 @@ async function executeAction(
   if (action.kind === 'mark') {
     // consent read fresh, like exec: a toggle applies without a restart
     const allowExec = readConfig().allowExec === true
-    return executeMark(action, (await backend.listPanes()).map((p) => p.id), { allowExec })
+    const target = (await backend.listPanes()).find((p) => p.id === action.paneId)
+    return executeMark(action, target ? await foregroundForTty(target.tty) : undefined, { allowExec })
   }
   if (action.kind === 'exec') {
     const cfg = readConfig() // fresh: toggles apply without a restart
@@ -424,6 +422,9 @@ async function executeAction(
     // HQ messages are for agents. If the agent exited since HQ last looked,
     // the pane is a shell now and the text would run as a command — refuse.
     if (!isAgentKind(occ.kind)) return { status: 'failed', outcome: 'no agent is running in that pane any more' }
+    // agents whose busy detection isn't calibrated (Devin): only an empty, idle composer
+    const gate = remoteSendRefusal(occ.kind, await backend.readScreen(pane.id))
+    if (gate) return { status: 'failed', outcome: gate }
     const { outcome } = await ensureDeliverable(
       { backend, clock: defaultClock, probeOccupant: () => occupantForPane(pane) },
       pane,
@@ -438,9 +439,12 @@ async function executeAction(
     // re-check right before typing: the wait above may have spanned a dialog or an exit
     const before = await occupantForPane(pane)
     if (!isAgentKind(before.kind)) return { status: 'failed', outcome: 'no agent is running in that pane any more' }
-    if (paneState(before, await backend.readScreen(pane.id)) === 'awaiting-input') {
+    const beforeScreen = await backend.readScreen(pane.id)
+    if (paneState(before, beforeScreen) === 'awaiting-input') {
       return { status: 'failed', outcome: 'the agent is showing a prompt — answer it first' }
     }
+    const stillReady = remoteSendRefusal(before.kind, beforeScreen)
+    if (stillReady) return { status: 'failed', outcome: stillReady }
     await backend.sendText(pane.id, enveloped, false)
     // Enter goes separately (TUIs treat text+CR as a paste) — and only if no
     // dialog popped up meanwhile, where Enter would answer it.
