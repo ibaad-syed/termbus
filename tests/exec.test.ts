@@ -12,9 +12,7 @@ describe('readOnlyViolation', () => {
     [['df', '-h']],
     [['du', '-sh', '.']],
     [['lsof', '-nP', '-iTCP', '-sTCP:LISTEN']],
-    [['git', 'status']],
     [['git', 'log', '--oneline', '-5']],
-    [['git', 'diff', '--stat']],
     [['git', 'remote', '-v']],
     [['git', 'branch', '-a']],
   ])('allows %j', (argv) => expect(readOnlyViolation(argv)).toBeNull())
@@ -29,6 +27,10 @@ describe('readOnlyViolation', () => {
     [['lsof', '/Users/x/file']],
     [['lsof', '-n']], // no -i: would list every open file
     [['git', 'push']],
+    [['git', 'status']], // reads the working tree: repo config can run code there
+    [['git', 'diff', '--stat']],
+    [['git', 'show', 'HEAD']],
+    [['git', 'log', '--recurse-submodules']],
     [['git', 'remote', 'add', 'x', 'y']],
     [['git', 'branch', '-D', 'main']],
     [['git', 'diff', '--no-index', '/Users/x/.ssh/id_rsa', '/dev/null']],
@@ -42,11 +44,11 @@ describe('readOnlyViolation', () => {
 
 describe('hardenGit', () => {
   it('turns off pagers, fsmonitor, external diff and textconv', () => {
-    expect(hardenGit(['git', 'diff', '--stat'])).toEqual([
+    expect(hardenGit(['git', 'log', '-p'])).toEqual([
       'git', '--no-pager', '-c', 'core.pager=cat', '-c', 'core.fsmonitor=false', '-c', 'diff.external=',
       '-c', 'log.showSignature=false', '-c', 'gpg.program=false',
       '-c', 'submodule.recurse=false', '-c', 'diff.ignoreSubmodules=all', '-c', 'status.submoduleSummary=false',
-      'diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=all', '--stat',
+      'log', '--no-ext-diff', '--no-textconv', '-p',
     ])
     expect(hardenGit(['ps', 'aux'])).toEqual(['ps', 'aux'])
   })
@@ -56,7 +58,7 @@ describe('parseExecRequest', () => {
   const fs = { home: '/Users/x', realpath: (p: string) => p, isDir: () => true }
   const parse = (o: object) => parseExecRequest(JSON.stringify(o), fs)
   it('argv on the list → runs (git hardened)', () => {
-    expect(parse({ argv: ['git', 'status'], cwd: '/Users/x/p' })).toMatchObject({ kind: 'argv', argv: expect.arrayContaining(['--no-pager', 'status']) })
+    expect(parse({ argv: ['git', 'log', '-3'], cwd: '/Users/x/p' })).toMatchObject({ kind: 'argv', argv: expect.arrayContaining(['--no-pager', 'log']) })
   })
   it('argv off the list → refused, even if marked approved (approved commands use the shell form)', () => {
     expect(parse({ argv: ['rm', '-rf', 'x'], cwd: '/Users/x/p', approved: true })).toHaveProperty('error')
@@ -186,12 +188,14 @@ describe('review round 3: git cannot read files or descend into submodules', () 
     expect(readOnlyViolation(['git', 'diff', '/dev/null', '/Users/x/.termbus/config.json'])).not.toBeNull()
     expect(readOnlyViolation(['git', 'diff', '../../.ssh/id_rsa'])).not.toBeNull()
     expect(readOnlyViolation(['git', 'diff', '~/.ssh/id_rsa'])).not.toBeNull()
-    expect(readOnlyViolation(['git', 'diff', 'main..feature/x'])).toBeNull()
+    expect(readOnlyViolation(['git', 'log', 'main..feature/x'])).toBeNull()
     expect(readOnlyViolation(['git', 'log', '--oneline', 'origin/main'])).toBeNull()
   })
   it('hardened git never recurses into submodules', () => {
-    const a = hardenGit(['git', 'status'])
-    expect(a).toEqual(expect.arrayContaining(['submodule.recurse=false', 'diff.ignoreSubmodules=all', '--ignore-submodules=all']))
+    expect(hardenGit(['git', 'log'])).toEqual(expect.arrayContaining(['submodule.recurse=false', 'diff.ignoreSubmodules=all']))
+  })
+  it('repo-local core.worktree (points git at files outside the repo) needs approval', () => {
+    expect(riskyLocalGitConfig('local\tcore.worktree=/Users/x')).toBe('core.worktree')
   })
   it('outside a work tree, or with submodules → needs approval (the reviewer\'s reproductions)', async () => {
     const { execFileSync } = await import('node:child_process')

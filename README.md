@@ -101,7 +101,7 @@ That installs a launchd service (runs at login, restarts automatically) streamin
 
 **The Conductor.** HQ includes a lead agent you chat with instead of juggling panes: it sees your agents and departments, reads their chats, sends messages and broadcasts, opens new Claude/Codex panes for new work (no permission-bypass flags, ever), and organizes agents into departments. It can also run commands on your Mac, in tiers you control:
 
-- read-only commands (`ps`, `git status/log/diff`, `ls`, `lsof -i`…) run directly — in a repo whose own git config could run programs, even those need approval;
+- read-only commands (`ps`, `ls`, `lsof -i`, `git log/branch/remote -v`…) run directly — in a repo whose own git config could run programs, even those need approval (`git status/diff` touch your working files, so they always do);
 - anything else needs your tap on an approval card in HQ **and** this Mac's one-time consent: `termbus bridge --allow-exec`;
 - HQ's *Full auto* setting skips the tap only if the Mac also allows it: `termbus bridge --allow-auto-exec` (undo with `--no-auto-exec` / `--no-exec`).
 

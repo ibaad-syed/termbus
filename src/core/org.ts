@@ -65,9 +65,15 @@ export function updateOrg(fn: (org: Org) => Org, path = orgFile()): Org {
       break
     } catch {
       try {
-        if (Date.now() - statSync(lock).mtimeMs > 10_000) rmSync(lock, { recursive: true, force: true })
+        if (Date.now() - statSync(lock).mtimeMs > 10_000) {
+          // move it aside first: two processes breaking the same stale lock
+          // must not delete the one that just re-took it
+          const aside = `${lock}.stale.${process.pid}.${Date.now()}`
+          renameSync(lock, aside)
+          rmSync(aside, { recursive: true, force: true })
+        }
       } catch {
-        // released meanwhile
+        // released or broken by someone else meanwhile
       }
       if (Date.now() > deadline) throw new TermbusError('departments are being edited elsewhere — try again')
       const until = Date.now() + 25

@@ -1,7 +1,7 @@
 import { parseArgs } from 'node:util'
 import { detectBackend } from '../backends/detect.js'
 import { defaultClock } from '../core/ask.js'
-import { ensureDeliverable, isAgentKind, resolveMode, type DeliveryMode } from '../core/delivery.js'
+import { ensureDeliverable, isAgentKind, paneState, resolveMode, type DeliveryMode } from '../core/delivery.js'
 import { buildEnvelope, detectSenderKind, envelopeId } from '../core/envelope.js'
 import { TermbusError } from '../core/errors.js'
 import { occupantForTty } from '../core/occupant.js'
@@ -68,9 +68,17 @@ export async function deliverToMany(
         reports.push({ pane, result: 'skipped', reason: 'the agent exited' })
         continue
       }
-      const body = `${prefix}${text.replace(/[\r\n]+/g, ' ')}`
+      const body = `${prefix}${text.replace(/[\u0000-\u001f\u007f]+/g, ' ')}`
       const payload = opts.plain ? body : `${buildEnvelope({ label: selfLabel, kind: senderKind }, envelopeId())} ${body}`
-      await backend.sendText(pane.id, payload, true)
+      await backend.sendText(pane.id, payload, false)
+      // Enter separately, and only if it's still an agent with no dialog up
+      await defaultClock.sleep(200)
+      const now = await occupantForTty(pane.tty)
+      if (!isAgentKind(now.kind) || paneState(now, await backend.readScreen(pane.id)) === 'awaiting-input') {
+        reports.push({ pane, result: 'skipped', reason: 'a prompt appeared — the text is in its input box, not submitted' })
+        continue
+      }
+      await backend.sendText(pane.id, '\r', false)
       reports.push({ pane, result: outcome === 'queued' ? 'queued' : 'sent' })
     } catch (e) {
       reports.push({ pane, result: 'skipped', reason: e instanceof Error ? e.message.split('\n')[0] : String(e) })

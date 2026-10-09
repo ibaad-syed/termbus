@@ -25,7 +25,13 @@ export const READONLY_TIMEOUT_MS = 20_000
 export const APPROVED_TIMEOUT_MS = 120_000
 export const OUTPUT_CAP = 16 * 1024
 
-const GIT_SUBCOMMANDS = new Set(['status', 'log', 'branch', 'diff', 'show', 'remote'])
+/**
+ * Only git commands that read HISTORY. status/diff/show read the working
+ * tree, and repo config can turn that into code execution or arbitrary file
+ * reads (filters, fsmonitor, core.worktree, submodules…) — three review
+ * rounds kept finding new ways. Those need the user's approval instead.
+ */
+const GIT_SUBCOMMANDS = new Set(['log', 'branch', 'remote'])
 
 /** Why an argv is not on the read-only list, or null if it is. */
 export function readOnlyViolation(argv: string[]): string | null {
@@ -63,7 +69,7 @@ export function readOnlyViolation(argv: string[]): string | null {
       if (sub === 'branch' && args.slice(1).some((x) => !/^-(a|r|v|vv|-list|-show-current|-all|-remotes)$/.test(x))) {
         return 'git branch only for listing'
       }
-      if (args.some((x) => /^--(output|ext-diff|textconv|exec|no-index|show-signature)/.test(x) || x === '-c')) return 'option not allowed'
+      if (args.some((x) => /^--(output|ext-diff|textconv|exec|no-index|show-signature|work-tree|git-dir|(ignore-|recurse-)?submodules?)/.test(x) || x === '-c')) return 'option not allowed'
       if (args.some((x) => /%G/.test(x))) return 'signature formats run gpg'
       // revisions and in-repo paths only: no absolute paths, no `..` segments,
       // no `~` (outside a repo `git diff a b` silently reads ANY two files)
@@ -84,9 +90,9 @@ export function readOnlyViolation(argv: string[]): string | null {
 export function hardenGit(argv: string[]): string[] {
   if (argv[0] !== 'git') return argv
   const [, sub, ...rest] = argv
-  const extra = sub === 'diff' || sub === 'show' || sub === 'log' ? ['--no-ext-diff', '--no-textconv'] : []
+  const extra = sub === 'log' ? ['--no-ext-diff', '--no-textconv'] : []
   // submodules have their own config (filters etc.): never descend into them
-  const noSub = sub === 'status' || sub === 'diff' ? ['--ignore-submodules=all'] : []
+  const noSub: string[] = []
   return [
     'git', '--no-pager',
     '-c', 'core.pager=cat', '-c', 'core.fsmonitor=false', '-c', 'diff.external=',
@@ -103,7 +109,7 @@ export function hardenGit(argv: string[]): string[] {
  * "read-only" — its git commands need the user's approval. The user's own
  * global/system config (git-lfs etc.) is trusted as before.
  */
-const RISKY_LOCAL_KEY = /^(filter\.|diff\.[^=]*\.(command|textconv)=|diff\.external=|gpg\.|core\.(fsmonitor|pager|sshcommand|editor|askpass|hookspath|gitproxy)=|credential\.|pager\.|include\.|includeif\.)/i
+const RISKY_LOCAL_KEY = /^(core\.worktree=|filter\.|diff\.[^=]*\.(command|textconv)=|diff\.external=|gpg\.|core\.(fsmonitor|pager|sshcommand|editor|askpass|hookspath|gitproxy)=|credential\.|pager\.|include\.|includeif\.)/i
 
 export function riskyLocalGitConfig(listing: string): string | null {
   for (const line of listing.split('\n')) {

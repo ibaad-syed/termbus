@@ -305,7 +305,8 @@ async function executeAction(
       { timeoutMs: 0, pollMs: 1000 },
     )
     // one line only: if the agent exits mid-send, a newline would run the first line in the shell
-    const text = action.payload.replace(/[\r\n]+/g, ' ')
+    // no control characters: \x03 quits an agent, \x0f submits in zsh…
+    const text = action.payload.replace(/[\u0000-\u001f\u007f]+/g, ' ')
     const enveloped = `${buildEnvelope({ label: 'hq', kind: 'shell' }, envelopeId())} ${text}`
     // re-check right before typing: the wait above may have spanned a dialog or an exit
     const before = await occupantForTty(pane.tty)
