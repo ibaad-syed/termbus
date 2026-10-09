@@ -8,6 +8,7 @@ import { parseArgs, promisify } from 'node:util'
 import { detectBackend } from '../backends/detect.js'
 import { defaultClock } from '../core/ask.js'
 import { ensureDeliverable, isAgentKind, paneState } from '../core/delivery.js'
+import { cursorOnAffirmative, readOptions, stepsToAffirmative } from '../core/approve.js'
 import { Cadence, paneDigest } from '../core/cadence.js'
 import { gitConfigRisk, parseExecRequest, runExec } from '../core/exec.js'
 import { applyOrgOp, loadOrg, updateOrg, type OrgOp } from '../core/org.js'
@@ -32,7 +33,7 @@ const USAGE =
   '  --uninstall  remove the launchd service\n' +
   '  --allow-exec / --no-exec\n' +
   '               let HQ run commands on this Mac that you approve with a tap (off by default;\n' +
-  '               read-only ones like ps / git status run either way)\n' +
+  '               read-only ones like ps / git log run either way)\n' +
   '  --allow-auto-exec / --no-auto-exec\n' +
   '               also let HQ\'s "Full auto" setting run commands without a tap (off by default)'
 
@@ -271,8 +272,32 @@ async function executeAction(
     if (promptFingerprint(screen) !== action.promptFingerprint) {
       return { status: 'stale', outcome: 'a different prompt is showing now' }
     }
-    await backend.sendText(pane.id, action.kind === 'approve' ? '\r' : '\u001b', false)
-    return { status: 'done' }
+    if (action.kind === 'reject') {
+      await backend.sendText(pane.id, '\u001b', false)
+      return { status: 'done' }
+    }
+    // Approve = choose the affirmative option. Usually it's highlighted
+    // already; Claude's folder-trust dialog opens on "No, exit" instead.
+    const steps = stepsToAffirmative(screen)
+    if (steps === null) {
+      if (readOptions(screen)) return { status: 'failed', outcome: 'cannot tell which option approves this dialog — answer it on the Mac' }
+      await backend.sendText(pane.id, '\r', false) // no option list: a plain confirm
+      return { status: 'done' }
+    }
+    if (steps !== 0) {
+      const key = steps > 0 ? '\u001b[B' : '\u001b[A'
+      for (let i = 0; i < Math.abs(steps); i++) {
+        await backend.sendText(pane.id, key, false)
+        await defaultClock.sleep(120)
+      }
+      await defaultClock.sleep(250)
+      // the cursor must now visibly sit on the affirmative option
+      if (!cursorOnAffirmative(await backend.readScreen(pane.id))) {
+        return { status: 'failed', outcome: 'moved to the approve option but could not confirm it on screen — nothing submitted' }
+      }
+    }
+    await backend.sendText(pane.id, '\r', false)
+    return { status: 'done', outcome: steps !== 0 ? 'selected the approve option, then confirmed' : undefined }
   }
 
   if (action.kind === 'answer') {
@@ -364,7 +389,7 @@ export async function cmdBridge(argv: string[]): Promise<void> {
     writeConfig(next)
     console.log(
       !next.allowExec
-        ? 'Commands from HQ are OFF on this Mac (read-only ones like ps / git status still run). Enable: termbus bridge --allow-exec'
+        ? 'Commands from HQ are OFF on this Mac (read-only ones like ps / git log still run). Enable: termbus bridge --allow-exec'
         : next.allowAutoExec
           ? 'Full auto ALLOWED: if HQ\'s Commands setting is "Full auto", the conductor can run any command here without asking. Undo: termbus bridge --no-auto-exec'
           : 'Commands you approve in HQ will run on this Mac (Full auto stays off). Undo: termbus bridge --no-exec',
