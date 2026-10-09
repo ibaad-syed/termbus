@@ -14,7 +14,9 @@
 
 export const HEARTBEAT_MS = 60_000
 export const WORK_FAST_MS = 1_000
-export const WORK_IDLE_MS = 10_000
+export const WORK_IDLE_MS = 5_000
+/** a prompt waiting longer than PROMPT_HOT_MS: still blocked on the user, polled at this pace */
+export const WORK_WAITING_MS = 3_000
 /** how long after activity the work poll stays fast */
 export const HOT_MS = 120_000
 /** a prompt waiting longer than this no longer keeps the poll fast */
@@ -79,8 +81,10 @@ export class Cadence {
   }
 
   workInterval(now: number): number {
-    const freshPrompt = [...this.promptSince.values()].some((since) => now - since < PROMPT_HOT_MS)
-    return freshPrompt || now - this.lastActivityAt < HOT_MS ? WORK_FAST_MS : WORK_IDLE_MS
+    const prompts = [...this.promptSince.values()]
+    if (prompts.some((since) => now - since < PROMPT_HOT_MS) || now - this.lastActivityAt < HOT_MS) return WORK_FAST_MS
+    // an old prompt still blocks an agent: a late tap on a notification must not wait long
+    return prompts.length > 0 ? WORK_WAITING_MS : WORK_IDLE_MS
   }
 
   shouldPollWork(now: number): boolean {

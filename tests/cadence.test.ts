@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { Cadence, HEARTBEAT_MS, HOT_MS, PROMPT_HOT_MS, WORK_FAST_MS, WORK_IDLE_MS, paneDigest, stableTitle } from '../src/core/cadence.js'
+import { Cadence, HEARTBEAT_MS, HOT_MS, PROMPT_HOT_MS, WORK_FAST_MS, WORK_IDLE_MS, WORK_WAITING_MS, paneDigest, stableTitle } from '../src/core/cadence.js'
 
 const pane = (over: Partial<Parameters<typeof paneDigest>[0][0]> = {}) => ({
   id: 'A',
@@ -77,10 +77,14 @@ describe('Cadence: work polling', () => {
     const c = new Cadence()
     c.observe(1_000_000, [{ id: 'A', state: 'awaiting-input' }])
     expect(c.workInterval(1_000_000 + 5000)).toBe(WORK_FAST_MS)
-    // a prompt nobody answered for 10 minutes stops keeping it hot
-    expect(c.workInterval(1_000_000 + PROMPT_HOT_MS + 1)).toBe(WORK_IDLE_MS)
+    // a prompt nobody answered for 10 minutes: slower, but still well under idle
+    expect(c.workInterval(1_000_000 + PROMPT_HOT_MS + 1)).toBe(WORK_WAITING_MS)
+    expect(WORK_WAITING_MS).toBeLessThan(WORK_IDLE_MS)
     c.activity(2_000_000)
     expect(c.workInterval(2_000_000 + HOT_MS - 1)).toBe(WORK_FAST_MS)
+    // the prompt is still waiting: 3s, not idle
+    expect(c.workInterval(2_000_000 + HOT_MS)).toBe(WORK_WAITING_MS)
+    c.observe(2_000_000 + HOT_MS, [{ id: 'A', state: 'idle' }])
     expect(c.workInterval(2_000_000 + HOT_MS)).toBe(WORK_IDLE_MS)
   })
   it('a prompt that clears and reappears is fresh again', () => {
@@ -102,7 +106,7 @@ describe('Cadence: work polling', () => {
     const t0 = HOT_MS * 10
     expect(c.shouldPollWork(t0)).toBe(true)
     c.polledWork(t0)
-    expect(c.shouldPollWork(t0 + 5000)).toBe(false)
+    expect(c.shouldPollWork(t0 + WORK_IDLE_MS - 1)).toBe(false)
     expect(c.shouldPollWork(t0 + WORK_IDLE_MS)).toBe(true)
   })
 })
