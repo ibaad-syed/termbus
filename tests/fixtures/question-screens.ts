@@ -188,3 +188,27 @@ export const CODEX_DONE = [
   '  GPT-6-Astra medium · /tmp/qa Plan mode ',
   '  ? for shortcuts                                     ⚠ 3 warnings · f2 to view',
 ].join('\n')
+
+/** A ~40-column split pane: question, descriptions and footer all wrap.
+ *  The last six lines are verbatim from a live capture in a split pane. */
+export const CLAUDE_NARROW_FRESH = [
+  '──────────────────────────────────────',
+  '←  ☐ Color  ☐ Toppings  ✔ Submit  → ',
+  ' ',
+  'Pick a color for the new dashboard ',
+  'theme, keeping accessibility in mind? ',
+  ' ',
+  '❯ 1. Red ',
+  '     A warm color that draws attention ',
+  '     to alerts and errors ',
+  '  2. Green ',
+  '     The color green ',
+  '  3. Blue ',
+  '     The color blue ',
+  '  4. Type something. ',
+  '──────────────────────────────────────',
+  '  5. Chat about this ',
+  ' ',
+  'Enter to select · Tab/Arrow keys to  ',
+  'navigate · Esc to cancel',
+].join('\n')

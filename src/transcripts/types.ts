@@ -44,6 +44,20 @@ export interface TranscriptQuestion {
   answers?: Record<string, string>
   /** the user dismissed the question without answering */
   declined?: boolean
+  /**
+   * Screen-built card (Claude: the dialog's tool_use isn't in the JSONL until
+   * it's answered). One card per visible dialog step; callId is
+   * `screen:<step fingerprint>`.
+   */
+  screen?: {
+    step: 'question' | 'review'
+    tabs: Array<{ header: string; answered: boolean }>
+    /** multi-select rows painted as ticked when the card was built */
+    ticked?: number[]
+    review?: Array<{ question: string; answer: string }>
+  }
+  /** a screen step that is no longer showing (answered, navigated away, closed) */
+  superseded?: boolean
 }
 
 export interface TranscriptTool {

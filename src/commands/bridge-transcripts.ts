@@ -7,6 +7,7 @@ import { discoverSessions, SessionTailer } from '../transcripts/index.js'
 import type { SessionInfo, TailerState, TranscriptEvent, TranscriptQuestionItem } from '../transcripts/index.js'
 import { occupantForTty } from '../core/occupant.js'
 import type { Pane } from '../core/types.js'
+import { SCREEN_CALL_PREFIX, type ClaudeScreenQuestion } from '../core/claude-question-screen.js'
 
 const execFileP = promisify(execFile)
 
@@ -205,6 +206,77 @@ export class TranscriptFeeder {
     }
   }
 
+  /** paneId → the screen-built question card currently shown in HQ */
+  private screenCards = new Map<string, { callId: string; key: string; info: SessionInfo }>()
+  private screenSeq = 0
+
+  /**
+   * Reconcile a Claude pane's visible AskUserQuestion step with HQ: when the
+   * step changes (answered, navigated, closed) the previous card is resolved
+   * as superseded and the new step becomes a card. Returns the events to post;
+   * [] when nothing changed. A step with no linked session yet is retried on
+   * the next call (nothing is recorded for it).
+   */
+  screenQuestionEvents(paneId: string, parsed: ClaudeScreenQuestion | null): Array<{ session: SessionInfo; event: TranscriptEvent }> {
+    const callId = parsed ? SCREEN_CALL_PREFIX + parsed.fingerprint : null
+    const prev = this.screenCards.get(paneId)
+    if (prev && prev.callId === callId) return []
+    const out: Array<{ session: SessionInfo; event: TranscriptEvent }> = []
+    const ev = (info: SessionInfo, key: string, kind: TranscriptEvent['kind'], question: TranscriptEvent['question']): TranscriptEvent => ({
+      v: 1,
+      agent: 'claude',
+      sessionId: info.sessionId,
+      epoch: SYNTHETIC_EPOCH,
+      seq: seqOf(key),
+      subSeq: 0,
+      ts: new Date().toISOString(),
+      kind,
+      tool: { name: 'AskUserQuestion' },
+      question,
+    })
+    if (prev) {
+      out.push({ session: prev.info, event: ev(prev.info, `${prev.key}#done`, 'tool_result', { callId: prev.callId, superseded: true }) })
+      this.screenCards.delete(paneId)
+    }
+    if (!parsed || !callId) return out
+    const entry = [...this.links.entries()].find(([, p]) => p === paneId)
+    const rec = entry ? this.tailers.get(entry[0]) : undefined
+    if (!rec || rec.info.agent !== 'claude') return out
+    const key = `${callId}#${this.screenSeq++}`
+    const question: TranscriptEvent['question'] =
+      parsed.step === 'review'
+        ? { callId, items: [], screen: { step: 'review', tabs: parsed.tabs, review: parsed.review } }
+        : {
+            callId,
+            allowOther: !parsed.multiSelect,
+            items: [
+              {
+                key: 'screen',
+                question: parsed.question,
+                multiSelect: parsed.multiSelect,
+                options: parsed.options.map((o) => ({ label: o.label, ...(o.description ? { description: o.description } : {}) })),
+              },
+            ],
+            screen: {
+              step: 'question',
+              tabs: parsed.tabs,
+              ...(parsed.multiSelect ? { ticked: parsed.options.flatMap((o, i) => (o.ticked ? [i] : [])) } : {}),
+            },
+          }
+    out.push({ session: rec.info, event: ev(rec.info, key, 'question', question) })
+    this.screenCards.set(paneId, { callId, key, info: rec.info })
+    return out
+  }
+
+  hasScreenCard(paneId: string): boolean {
+    return this.screenCards.has(paneId)
+  }
+
+  /** Drop a pane's card state so the next reconcile re-posts it (after a failed POST). */
+  forgetScreenCard(paneId: string): void {
+    this.screenCards.delete(paneId)
+  }
+
   async tick(panes: Pane[]): Promise<void> {
     this.tickCount++
     const sessions = (await discoverSessions({ activeWindowMs: 24 * 3600 * 1000 })).slice(0, 8)
@@ -291,8 +363,8 @@ export class TranscriptFeeder {
   }
 
   /** Push a synthesized event immediately (permission prompts can't wait). */
-  async postSynthetic(payload: { session: SessionInfo; event: TranscriptEvent }): Promise<void> {
-    await this.api('/api/bridge/transcript', {
+  async postSynthetic(payload: { session: SessionInfo; event: TranscriptEvent }): Promise<boolean> {
+    const res = await this.api('/api/bridge/transcript', {
       method: 'POST',
       body: JSON.stringify({
         sessions: [
@@ -305,6 +377,13 @@ export class TranscriptFeeder {
         ],
         events: [payload.event],
       }),
-    }).catch(() => {})
+    }).catch(() => null)
+    return !!res && res.ok
   }
+}
+
+function seqOf(key: string): number {
+  let h = 0
+  for (const c of key) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0
+  return h % 2147483647
 }

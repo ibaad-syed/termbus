@@ -12,6 +12,7 @@ import { buildEnvelope, envelopeId } from '../core/envelope.js'
 import { TermbusError } from '../core/errors.js'
 import { occupantForTty } from '../core/occupant.js'
 import { looksLikeQuestionDialog } from '../core/idle.js'
+import { executeScreenAnswer, parseClaudeQuestionScreen, SCREEN_CALL_PREFIX, type ScreenAnswer } from '../core/claude-question-screen.js'
 import { planAnswerSteps, runAnswerSteps, validateAnswers, verifyFreshDialog, type QuestionAnswer } from '../core/question.js'
 import { applySnapshots, diffStates, type WatchSnapshot } from '../core/watch.js'
 import { TranscriptFeeder } from './bridge-transcripts.js'
@@ -160,6 +161,19 @@ async function executeAction(
   }
 
   if (action.kind === 'answer') {
+    // screen-built Claude cards carry `screen:<step fingerprint>`; the step on
+    // screen must still be exactly that one (checked inside)
+    let parsed: { callId?: unknown; answer?: unknown } | null = null
+    try {
+      parsed = JSON.parse(action.payload ?? '')
+    } catch {
+      parsed = null
+    }
+    if (parsed && typeof parsed.callId === 'string' && parsed.callId.startsWith(SCREEN_CALL_PREFIX)) {
+      if (occ.kind !== 'claude') return { status: 'stale', outcome: 'pane is no longer running claude' }
+      const answer = (parsed.answer && typeof parsed.answer === 'object' ? parsed.answer : {}) as ScreenAnswer
+      return executeScreenAnswer(backend, pane.id, parsed.callId, answer, defaultClock)
+    }
     return executeAnswer(backend, pane, occ.kind, action, feeder)
   }
 
@@ -311,6 +325,19 @@ export async function cmdBridge(argv: string[]): Promise<void> {
               syn = feeder.syntheticPermissionEvent(ev.paneId, ev.screen, ev.promptFingerprint)
             }
             if (syn) await feeder.postSynthetic(syn)
+          }
+        }
+        // Claude question dialogs → screen-built cards, one per visible step
+        for (const snap of snaps) {
+          if (snap.occupant !== 'claude') continue
+          const parsed = snap.screen ? parseClaudeQuestionScreen(snap.screen) : null
+          let posts = feeder.screenQuestionEvents(snap.id, parsed)
+          if (parsed && !feeder.hasScreenCard(snap.id)) {
+            await feeder.refreshLinks(allPanes) // the pane may be seconds old
+            posts = [...posts, ...feeder.screenQuestionEvents(snap.id, parsed)]
+          }
+          for (const post of posts) {
+            if (!(await feeder.postSynthetic(post))) feeder.forgetScreenCard(snap.id)
           }
         }
       }
