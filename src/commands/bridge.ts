@@ -300,7 +300,7 @@ export async function cmdBridge(argv: string[]): Promise<void> {
         }
       })
       const now = Date.now()
-      cadence.observe(now, snaps, events.length > 0)
+      cadence.observe(now, snaps)
       const digest = paneDigest(snaps)
       if (cadence.shouldSync(now, digest, events.length > 0)) {
         const sync = await api(relay, secret, '/api/bridge/sync', {
@@ -372,7 +372,9 @@ export async function cmdBridge(argv: string[]): Promise<void> {
       const work = cadence.shouldPollWork(Date.now()) ? await api(relay, secret, '/api/bridge/work') : null
       if (work) cadence.polledWork(Date.now())
       if (work?.ok) {
-        const { actions } = (await work.json()) as { actions: HqAction[] }
+        const { actions, hot } = (await work.json()) as { actions: HqAction[]; hot?: boolean }
+        // someone has HQ open (a live chat): answer their messages within a second
+        if (hot) cadence.activity(Date.now())
         for (const action of actions) {
           const result = await executeAction(backend, action, feeder).catch((e: unknown) => ({
             status: 'failed',

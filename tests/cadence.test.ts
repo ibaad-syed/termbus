@@ -75,7 +75,7 @@ describe('Cadence: work polling', () => {
   })
   it('a fresh prompt or recent activity → every second', () => {
     const c = new Cadence()
-    c.observe(1_000_000, [{ id: 'A', state: 'awaiting-input' }], false)
+    c.observe(1_000_000, [{ id: 'A', state: 'awaiting-input' }])
     expect(c.workInterval(1_000_000 + 5000)).toBe(WORK_FAST_MS)
     // a prompt nobody answered for 10 minutes stops keeping it hot
     expect(c.workInterval(1_000_000 + PROMPT_HOT_MS + 1)).toBe(WORK_IDLE_MS)
@@ -85,11 +85,18 @@ describe('Cadence: work polling', () => {
   })
   it('a prompt that clears and reappears is fresh again', () => {
     const c = new Cadence()
-    c.observe(0, [{ id: 'A', state: 'awaiting-input' }], false)
-    c.observe(PROMPT_HOT_MS + 1, [{ id: 'A', state: 'idle' }], false)
-    c.observe(PROMPT_HOT_MS + 2, [{ id: 'A', state: 'awaiting-input' }], false)
+    c.observe(0, [{ id: 'A', state: 'awaiting-input' }])
+    c.observe(PROMPT_HOT_MS + 1, [{ id: 'A', state: 'idle' }])
+    c.observe(PROMPT_HOT_MS + 2, [{ id: 'A', state: 'awaiting-input' }])
     expect(c.workInterval(PROMPT_HOT_MS + 3)).toBe(WORK_FAST_MS)
   })
+  it('agents going busy/idle do not make it hot', () => {
+    const c = new Cadence()
+    c.observe(1_000_000, [{ id: 'A', state: 'busy' }])
+    c.observe(1_001_000, [{ id: 'A', state: 'idle' }])
+    expect(c.workInterval(1_002_000)).toBe(WORK_IDLE_MS)
+  })
+
   it('shouldPollWork honours the interval', () => {
     const c = new Cadence()
     const t0 = HOT_MS * 10

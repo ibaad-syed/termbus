@@ -7,8 +7,9 @@
  * - sync: only when something a person would notice changed (a pane opened
  *   or closed, an agent started/finished, a prompt or question appeared or
  *   changed), plus a heartbeat so HQ knows the Mac is alive.
- * - work: fast while something is "hot" (a prompt is waiting for an answer,
- *   or an action just ran — the user is likely interacting), slow otherwise.
+ * - work: fast while something is "hot" — a prompt is waiting for an answer,
+ *   an action just ran, or HQ says someone is looking right now (`hot` in the
+ *   /work response) — so a live chat stays live; slow otherwise.
  */
 
 export const HEARTBEAT_MS = 60_000
@@ -64,12 +65,12 @@ export class Cadence {
     this.lastDigest = digest
   }
 
-  /** Track which panes wait on a prompt, and since when. */
-  observe(now: number, panes: Array<{ id: string; state: string }>, hasEvents: boolean): void {
+  /** Track which panes wait on a prompt, and since when. Agents going
+   *  busy/idle is not interaction — only prompts and actions make it hot. */
+  observe(now: number, panes: Array<{ id: string; state: string }>): void {
     const waiting = new Set(panes.filter((p) => p.state === 'awaiting-input').map((p) => p.id))
     for (const id of [...this.promptSince.keys()]) if (!waiting.has(id)) this.promptSince.delete(id)
     for (const id of waiting) if (!this.promptSince.has(id)) this.promptSince.set(id, now)
-    if (hasEvents) this.lastActivityAt = now
   }
 
   /** An action ran, or a reply is pending: the user is interacting. */
