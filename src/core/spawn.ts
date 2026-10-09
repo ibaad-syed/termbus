@@ -1,6 +1,6 @@
-import { realpathSync, statSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, sep } from 'node:path'
+import { dirname, isAbsolute, join, sep } from 'node:path'
 import { shellQuote } from '../restore/resume-command.js'
 
 /**
@@ -64,11 +64,12 @@ export function parseSpawnRequest(
   }
 }
 
-/** The shell line a spawned pane runs: no flags, the prompt as one quoted
- *  argument that can never be parsed as an option (a leading "-" would make
- *  `--yolo` or `--dangerously-skip-permissions` a flag, not text). */
+/** The shell line a spawned pane runs: no flags, and the prompt ALWAYS
+ *  prefixed — as a bare first argument it could parse as an option
+ *  (`--yolo`), a subcommand (`update`, `logout`, `exec`), or a slash/bang
+ *  command (`/…`, `!…`). "Task: …" is always just text. */
 export function spawnShellLine(req: SpawnRequest): string {
-  const prompt = req.prompt && /^\s*-/.test(req.prompt) ? `Task: ${req.prompt.trimStart()}` : req.prompt
+  const prompt = req.prompt ? `Task: ${req.prompt.trimStart()}` : null
   const argv = [req.agent, ...(prompt ? [prompt] : [])]
   return `cd ${shellQuote(req.cwd)} && ${argv.map(shellQuote).join(' ')}`
 }
@@ -78,12 +79,36 @@ export class SpawnLimiter {
   constructor(
     private readonly limit = SPAWN_LIMIT,
     private readonly windowMs = SPAWN_WINDOW_MS,
-  ) {}
+    private readonly file: string | null = null,
+  ) {
+    if (file) {
+      try {
+        const t = JSON.parse(readFileSync(file, 'utf8')) as unknown
+        if (Array.isArray(t)) this.times = t.filter((x): x is number => typeof x === 'number')
+      } catch {
+        // no history yet
+      }
+    }
+  }
+
+  /** Survives bridge restarts (a crash loop must not reset the limit). */
+  static persistent(): SpawnLimiter {
+    return new SpawnLimiter(SPAWN_LIMIT, SPAWN_WINDOW_MS, join(homedir(), '.termbus', 'spawn-times.json'))
+  }
+
   /** Records the spawn and returns true if allowed. */
   take(now: number): boolean {
     this.times = this.times.filter((t) => now - t < this.windowMs)
     if (this.times.length >= this.limit) return false
     this.times.push(now)
+    if (this.file) {
+      try {
+        mkdirSync(dirname(this.file), { recursive: true })
+        writeFileSync(this.file, JSON.stringify(this.times))
+      } catch {
+        // best effort
+      }
+    }
     return true
   }
 }

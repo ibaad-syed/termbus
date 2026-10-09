@@ -9,7 +9,9 @@ import { detectBackend } from '../backends/detect.js'
 import { defaultClock } from '../core/ask.js'
 import { ensureDeliverable, isAgentKind, paneState } from '../core/delivery.js'
 import { Cadence, paneDigest } from '../core/cadence.js'
-import { parseExecRequest, runExec } from '../core/exec.js'
+import { gitConfigRisk, parseExecRequest, runExec } from '../core/exec.js'
+import { applyOrgOp, loadOrg, saveOrg, type OrgOp } from '../core/org.js'
+import { packageRoot } from './install-skill.js'
 import { parseSpawnRequest, SPAWN_LIMIT, SPAWN_WINDOW_MS, SpawnLimiter, spawnShellLine } from '../core/spawn.js'
 import { launchScript } from '../restore/resume-command.js'
 import { buildEnvelope, envelopeId } from '../core/envelope.js'
@@ -28,9 +30,11 @@ const USAGE =
   '  --save       remember relay+secret in ~/.termbus/config.json (then flags are optional)\n' +
   '  --install    run persistently via launchd (auto-start on login, auto-restart)\n' +
   '  --uninstall  remove the launchd service\n' +
+  '  --allow-exec / --no-exec\n' +
+  '               let HQ run commands on this Mac that you approve with a tap (off by default;\n' +
+  '               read-only ones like ps / git status run either way)\n' +
   '  --allow-auto-exec / --no-auto-exec\n' +
-  '               let HQ\'s "Full auto" setting run commands on this Mac without a tap (off by default;\n' +
-  '               commands you approve in HQ, and read-only ones like ps/git status, work either way)'
+  '               also let HQ\'s "Full auto" setting run commands without a tap (off by default)'
 
 const CONFIG_FILE = join(homedir(), '.termbus', 'config.json')
 const PLIST_LABEL = 'com.termbus.bridge'
@@ -40,7 +44,9 @@ const execFileAsync = promisify(execFile)
 interface BridgeConfig {
   relay?: string
   secret?: string
-  /** this Mac's local consent for HQ's "Full auto" commands */
+  /** this Mac's local consent to run commands the user approves in HQ */
+  allowExec?: boolean
+  /** this Mac's local consent for HQ's "Full auto" commands (implies allowExec) */
   allowAutoExec?: boolean
 }
 
@@ -57,6 +63,16 @@ function writeConfig(cfg: BridgeConfig): void {
   writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), { mode: 0o600 })
 }
 
+const BRIDGE_VERSION = (() => {
+  try {
+    return (JSON.parse(readFileSync(join(packageRoot(), 'package.json'), 'utf8')) as { version: string }).version
+  } catch {
+    return 'unknown'
+  }
+})()
+/** What this bridge can do — HQ holds back actions an older bridge can't run. */
+const BRIDGE_CAPABILITIES = ['spawn', 'exec', 'org']
+
 const FOOTER_LINES = 15 // prompt fingerprints stay footer-scoped
 const PEEK_LINES = 60 // terminal view in HQ
 
@@ -69,7 +85,7 @@ interface HqAction {
   id: number
   paneId: string
   paneLabel: string
-  kind: 'approve' | 'reject' | 'send' | 'rename' | 'answer' | 'spawn' | 'exec'
+  kind: 'approve' | 'reject' | 'send' | 'rename' | 'answer' | 'spawn' | 'exec' | 'org'
   payload: string | null
   promptFingerprint: string | null
 }
@@ -183,13 +199,38 @@ export async function executeSpawn(
   return { status: 'done', outcome: paneId }
 }
 
+/** HQ edits a department (create/delete/rename/add/remove) on this Mac's org. */
+export function executeOrg(action: Pick<HqAction, 'payload'>): { status: string; outcome?: string } {
+  let op: OrgOp
+  try {
+    op = JSON.parse(action.payload ?? '') as OrgOp
+  } catch {
+    return { status: 'failed', outcome: 'org payload is not JSON' }
+  }
+  if (!['create', 'delete', 'rename', 'add', 'remove'].includes(op?.op)) return { status: 'failed', outcome: 'unknown org op' }
+  if ((op.op === 'add' || op.op === 'remove') && (!Array.isArray(op.paneIds) || !op.paneIds.every((x) => typeof x === 'string'))) {
+    return { status: 'failed', outcome: 'paneIds must be a list of pane ids' }
+  }
+  try {
+    const next = applyOrgOp(loadOrg(), op)
+    saveOrg(next)
+    return { status: 'done', outcome: JSON.stringify(next) }
+  } catch (e) {
+    return { status: 'failed', outcome: e instanceof Error ? e.message : String(e) }
+  }
+}
+
 /** Run a command for HQ's conductor (see src/core/exec.ts for the rules). */
 export async function executeExec(
   action: Pick<HqAction, 'payload'>,
-  allowAutoExec: boolean,
+  consent: { allowExec: boolean; allowAutoExec: boolean },
 ): Promise<{ status: string; outcome?: string }> {
-  const req = parseExecRequest(action.payload, { allowAutoExec })
+  const req = parseExecRequest(action.payload, consent)
   if ('error' in req) return { status: 'failed', outcome: req.error }
+  if (req.kind === 'argv' && req.argv[0] === 'git') {
+    const risky = await gitConfigRisk(req.cwd)
+    if (risky) return { status: 'failed', outcome: `not read-only here: this repo's own git config sets ${risky}, which can run programs — needs the user's approval` }
+  }
   const result = await runExec(req, userInfo().shell || process.env.SHELL || '/bin/zsh')
   const what = req.kind === 'argv' ? req.argv.join(' ') : `${req.command} (approved: ${req.approvedBy})`
   console.log(`exec in ${req.cwd}: ${what.slice(0, 200)} → exit ${result.exitCode}`)
@@ -205,7 +246,11 @@ async function executeAction(
   if (action.kind === 'spawn') {
     return spawnCtx ? executeSpawn(backend, action, spawnCtx) : { status: 'failed', outcome: 'spawning is not enabled' }
   }
-  if (action.kind === 'exec') return executeExec(action, readConfig().allowAutoExec === true)
+  if (action.kind === 'org') return executeOrg(action)
+  if (action.kind === 'exec') {
+    const cfg = readConfig() // fresh: toggles apply without a restart
+    return executeExec(action, { allowExec: cfg.allowExec === true, allowAutoExec: cfg.allowAutoExec === true })
+  }
   const panes = await backend.listPanes()
   const pane = panes.find((p) => p.id === action.paneId)
   if (!pane) return { status: 'failed', outcome: 'pane no longer exists' }
@@ -247,6 +292,9 @@ async function executeAction(
 
   if (action.kind === 'send') {
     if (!action.payload) return { status: 'failed', outcome: 'empty payload' }
+    // HQ messages are for agents. If the agent exited since HQ last looked,
+    // the pane is a shell now and the text would run as a command — refuse.
+    if (!isAgentKind(occ.kind)) return { status: 'failed', outcome: 'no agent is running in that pane any more' }
     const { outcome } = await ensureDeliverable(
       { backend, clock: defaultClock, probeOccupant: () => occupantForTty(pane.tty) },
       pane,
@@ -254,10 +302,17 @@ async function executeAction(
       'queue',
       { timeoutMs: 0, pollMs: 1000 },
     )
-    const enveloped = isAgentKind(occ.kind)
-      ? `${buildEnvelope({ label: 'hq', kind: 'shell' }, envelopeId())} ${action.payload}`
-      : action.payload
-    await backend.sendText(pane.id, enveloped, true)
+    const enveloped = `${buildEnvelope({ label: 'hq', kind: 'shell' }, envelopeId())} ${action.payload}`
+    await backend.sendText(pane.id, enveloped, false)
+    // Enter goes separately (TUIs treat text+CR as a paste) — and only if no
+    // dialog popped up meanwhile, where Enter would answer it.
+    await defaultClock.sleep(200)
+    const now = await occupantForTty(pane.tty)
+    const screen = isAgentKind(now.kind) ? await backend.readScreen(pane.id) : ''
+    if (!isAgentKind(now.kind) || paneState(now, screen) === 'awaiting-input') {
+      return { status: 'failed', outcome: 'a prompt appeared while sending — the text is in the input box, not submitted' }
+    }
+    await backend.sendText(pane.id, '\r', false)
     return { status: 'done', outcome: outcome === 'queued' ? 'queued (pane was busy)' : 'delivered' }
   }
 
@@ -282,20 +337,28 @@ export async function cmdBridge(argv: string[]): Promise<void> {
       install: { type: 'boolean' },
       uninstall: { type: 'boolean' },
       'no-transcripts': { type: 'boolean' },
+      'allow-exec': { type: 'boolean' },
+      'no-exec': { type: 'boolean' },
       'allow-auto-exec': { type: 'boolean' },
       'no-auto-exec': { type: 'boolean' },
     },
   })
   const saved = readConfig()
-  if (values['allow-auto-exec'] || values['no-auto-exec']) {
-    const on = !!values['allow-auto-exec'] && !values['no-auto-exec']
-    writeConfig({ ...saved, allowAutoExec: on })
+  if (values['allow-exec'] || values['no-exec'] || values['allow-auto-exec'] || values['no-auto-exec']) {
+    const next = { ...saved }
+    if (values['no-exec']) Object.assign(next, { allowExec: false, allowAutoExec: false })
+    if (values['allow-exec']) next.allowExec = true
+    if (values['no-auto-exec']) next.allowAutoExec = false
+    if (values['allow-auto-exec']) Object.assign(next, { allowExec: true, allowAutoExec: true })
+    writeConfig(next)
     console.log(
-      on
-        ? 'Full auto ALLOWED on this Mac: if HQ\'s Commands setting is "Full auto", the conductor can run any command here without asking. Undo: termbus bridge --no-auto-exec'
-        : 'Full auto is OFF on this Mac: commands need your tap in HQ (read-only ones still run).',
+      !next.allowExec
+        ? 'Commands from HQ are OFF on this Mac (read-only ones like ps / git status still run). Enable: termbus bridge --allow-exec'
+        : next.allowAutoExec
+          ? 'Full auto ALLOWED: if HQ\'s Commands setting is "Full auto", the conductor can run any command here without asking. Undo: termbus bridge --no-auto-exec'
+          : 'Commands you approve in HQ will run on this Mac (Full auto stays off). Undo: termbus bridge --no-exec',
     )
-    return // read fresh by the running bridge before every command — no restart needed
+    return // read fresh before every command — no restart needed
   }
   const relay = (values.relay ?? saved.relay)?.replace(/\/$/, '')
   const secret = values.secret ?? process.env.TERMBUS_BRIDGE_SECRET ?? saved.secret
@@ -360,7 +423,8 @@ export async function cmdBridge(argv: string[]): Promise<void> {
   // panes we delivered a send to and owe HQ the agent's reply
   const awaitingReply = new Map<string, { label: string; since: number; sawBusy: boolean }>()
   const cadence = new Cadence()
-  const spawnCtx: SpawnContext = { limiter: new SpawnLimiter(), anchorPaneId: null }
+  const spawnCtx: SpawnContext = { limiter: SpawnLimiter.persistent(), anchorPaneId: null }
+  let execChain: Promise<void> = Promise.resolve()
   for (;;) {
     try {
       const allPanes = await backend.listPanes()
@@ -381,7 +445,8 @@ export async function cmdBridge(argv: string[]): Promise<void> {
       })
       const now = Date.now()
       cadence.observe(now, snaps)
-      const digest = paneDigest(snaps)
+      const org = loadOrg()
+      const digest = paneDigest(snaps) + JSON.stringify(org.departments)
       if (cadence.shouldSync(now, digest, events.length > 0)) {
         const sync = await api(relay, secret, '/api/bridge/sync', {
           method: 'POST',
@@ -395,6 +460,8 @@ export async function cmdBridge(argv: string[]): Promise<void> {
               screen: s.screen,
             })),
             events,
+            org: { departments: org.departments.map((d) => ({ name: d.name, members: d.members })) },
+            bridge: { version: BRIDGE_VERSION, capabilities: BRIDGE_CAPABILITIES },
           }),
         })
         if (!sync.ok) throw new Error(`sync ${sync.status}`)
@@ -455,21 +522,36 @@ export async function cmdBridge(argv: string[]): Promise<void> {
         const { actions, hot } = (await work.json()) as { actions: HqAction[]; hot?: boolean }
         // someone has HQ open (a live chat): answer their messages within a second
         if (hot) cadence.activity(Date.now())
+        const report = async (action: HqAction, result: { status: string; outcome?: string }) => {
+          console.log(`action #${action.id} ${action.kind} → ${action.paneLabel ?? '-'}: ${result.status}${result.outcome && action.kind !== 'exec' ? ` (${result.outcome})` : ''}`)
+          const posted = await api(relay, secret, '/api/bridge/result', {
+            method: 'POST',
+            body: JSON.stringify({ actionId: action.id, ...result }),
+          }).catch(() => null)
+          if (!posted?.ok) console.error(`result for #${action.id} not accepted (${posted?.status ?? 'network'}) — action stays claimed on the relay`)
+        }
         for (const action of actions) {
+          cadence.activity(Date.now()) // the user is interacting: keep polling fast
+          if (action.kind === 'exec') {
+            // commands can take minutes: run them one at a time OFF the loop,
+            // so syncs, heartbeats and approvals keep flowing meanwhile
+            execChain = execChain.then(async () => {
+              const result = await executeAction(backend, action, feeder, spawnCtx).catch((e: unknown) => ({
+                status: 'failed',
+                outcome: e instanceof Error ? e.message : String(e),
+              }))
+              await report(action, result)
+            })
+            continue
+          }
           const result = await executeAction(backend, action, feeder, spawnCtx).catch((e: unknown) => ({
             status: 'failed',
             outcome: e instanceof Error ? e.message : String(e),
           }))
-          cadence.activity(Date.now()) // the user is interacting: keep polling fast
-          console.log(`action #${action.id} ${action.kind} → ${action.paneLabel}: ${result.status}${result.outcome ? ` (${result.outcome})` : ''}`)
           if (action.kind === 'send' && result.status === 'done') {
             awaitingReply.set(action.paneId, { label: action.paneLabel, since: Date.now(), sawBusy: false })
           }
-          const posted = await api(relay, secret, '/api/bridge/result', {
-            method: 'POST',
-            body: JSON.stringify({ actionId: action.id, ...result }),
-          })
-          if (!posted.ok) console.error(`result for #${action.id} not accepted (${posted.status}) — action stays claimed on the relay`)
+          await report(action, result)
         }
       }
       failures = 0

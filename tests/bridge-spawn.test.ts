@@ -50,7 +50,7 @@ describe('executeSpawn', () => {
     expect(r2).toEqual({ status: 'done', outcome: 'P2' })
     expect(calls).toEqual(['window:cmd', 'name:P1:API', 'tab:cmd'])
     const script = readFileSync(join(home, '.termbus', 'launch', 'spawn-1.sh'), 'utf8')
-    expect(script).toContain("&& claude 'fix tests'")
+    expect(script).toContain("&& claude 'Task: fix tests'")
     expect(script).not.toMatch(/dangerously|--yolo/)
   })
 

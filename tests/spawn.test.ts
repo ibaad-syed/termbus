@@ -38,13 +38,18 @@ describe('parseSpawnRequest', () => {
 describe('spawnShellLine', () => {
   it('no flags; a hostile prompt stays one quoted argument', () => {
     const line = spawnShellLine({ agent: 'claude', cwd: '/Users/x/my proj', name: null, prompt: "do it'; rm -rf ~; echo '" })
-    expect(line).toBe(`cd '/Users/x/my proj' && claude 'do it'\\''; rm -rf ~; echo '\\'''`)
+    expect(line).toBe(`cd '/Users/x/my proj' && claude 'Task: do it'\\''; rm -rf ~; echo '\\'''`)
   })
   it('a prompt that looks like a flag can never become one', () => {
     expect(spawnShellLine({ agent: 'codex', cwd: '/Users/x/p', name: null, prompt: '--yolo' })).toBe("cd /Users/x/p && codex 'Task: --yolo'")
     expect(spawnShellLine({ agent: 'claude', cwd: '/Users/x/p', name: null, prompt: '  --dangerously-skip-permissions fix it' })).toBe(
       "cd /Users/x/p && claude 'Task: --dangerously-skip-permissions fix it'",
     )
+  })
+  it('a one-word prompt can never be a subcommand or slash command', () => {
+    for (const w of ['update', 'logout', 'exec', '/login', '!rm -rf ~']) {
+      expect(spawnShellLine({ agent: 'codex', cwd: '/Users/x/p', name: null, prompt: w })).toMatch(/codex 'Task: /)
+    }
   })
   it('no prompt → bare agent', () => {
     expect(spawnShellLine({ agent: 'codex', cwd: '/Users/x/p', name: null, prompt: null })).toBe('cd /Users/x/p && codex')
@@ -57,5 +62,19 @@ describe('SpawnLimiter', () => {
     for (let i = 0; i < 5; i++) expect(l.take(i)).toBe(true)
     expect(l.take(10)).toBe(false)
     expect(l.take(10 * 60_000 + 1)).toBe(true)
+  })
+})
+
+describe('SpawnLimiter.persistent-style file', () => {
+  it('a restart does not reset the limit', async () => {
+    const { mkdtempSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const file = join(mkdtempSync(join(tmpdir(), 'termbus-lim-')), 'spawn-times.json')
+    const a = new SpawnLimiter(2, 60_000, file)
+    expect(a.take(1)).toBe(true)
+    expect(a.take(2)).toBe(true)
+    const b = new SpawnLimiter(2, 60_000, file) // bridge restarted
+    expect(b.take(3)).toBe(false)
   })
 })

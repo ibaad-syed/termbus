@@ -2,7 +2,10 @@ import { mkdtempSync, mkdirSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { executeExec } from '../src/commands/bridge.js'
+import { executeExec as run } from '../src/commands/bridge.js'
+
+// tests run with commands allowed unless a case says otherwise
+const executeExec = (a: { payload: string }, auto: boolean, allowExec = true) => run(a, { allowExec, allowAutoExec: auto })
 
 let home: string
 beforeEach(() => {
@@ -34,6 +37,11 @@ describe('executeExec', () => {
     const ok = await executeExec(p({ command: 'touch made', cwd: home, approved: 'auto' }), true)
     expect(ok.status).toBe('done')
     expect(realpathSync(join(home, 'made'))).toBeTruthy()
+  })
+  it('approved commands need this Mac\'s --allow-exec', async () => {
+    const r = await executeExec(p({ command: 'touch nope', cwd: home, approved: 'user' }), false, false)
+    expect(r).toMatchObject({ status: 'failed', outcome: expect.stringMatching(/--allow-exec/) })
+    expect(() => realpathSync(join(home, 'nope'))).toThrow()
   })
   it('outside home → refused', async () => {
     expect((await executeExec(p({ argv: ['ls'], cwd: '/etc' }), true)).status).toBe('failed')
