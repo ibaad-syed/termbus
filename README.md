@@ -75,7 +75,7 @@ termbus mark w1.t2.p1 devin      # any built-in or agents.json kind
 termbus unmark w1.t2.p1          # back to automatic detection
 ```
 
-Marks live in `~/.termbus/marks.json` (`TERMBUS_MARKS_FILE`), win over process detection while a program runs in the pane (once it exits the pane is a shell again, so text is never typed into a bare prompt), show as `kind*` in `termbus list` (`"marked": true` in `--json`), follow panes through `termbus restore`, and can be set from HQ.
+Marks live in `~/.termbus/marks.json` (`TERMBUS_MARKS_FILE`), win over process detection while a program runs in the pane (once it exits the pane is a shell again, so text is never typed into a bare prompt), show as `kind*` in `termbus list` (`"marked": true` in `--json`), follow panes through `termbus restore`, and can be set from HQ — by you only (never the Conductor), and only if this Mac allows it with `termbus bridge --allow-exec`, since a marked pane receives HQ messages; unmarking from HQ always works.
 
 ## Survive a restart
 

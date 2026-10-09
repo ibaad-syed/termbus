@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { executeMark, hqSenderLabel } from '../src/commands/bridge.js'
+import { executeMark, hqSenderLabel, MARK_NEEDS_EXEC } from '../src/commands/bridge.js'
 import { buildEnvelope, parseEnvelope } from '../src/core/envelope.js'
 import { applyMark, applyMarkToOccupant, loadMarks, remapMarks, updateMarks } from '../src/core/marks.js'
 
@@ -44,8 +44,13 @@ describe('marks', () => {
 })
 
 describe('bridge `mark` action', () => {
-  const act = (paneId: string, body: unknown, open = ['P1', 'P2']) =>
-    executeMark({ paneId, payload: typeof body === 'string' ? body : JSON.stringify(body) }, open, path)
+  const act = (paneId: string, body: unknown, open = ['P1', 'P2'], extra: { origin?: string; allowExec?: boolean } = {}) =>
+    executeMark(
+      { paneId, payload: typeof body === 'string' ? body : JSON.stringify(body), origin: extra.origin },
+      open,
+      { allowExec: extra.allowExec ?? true },
+      path,
+    )
 
   it('marks and unmarks a pane', () => {
     expect(act('P1', { kind: 'devin' })).toEqual({ status: 'done', outcome: 'marked as devin' })
@@ -55,6 +60,20 @@ describe('bridge `mark` action', () => {
   })
   it('unmarking a pane that was never marked fails clearly', () => {
     expect(act('P2', { kind: null })).toEqual({ status: 'failed', outcome: 'this pane was detected automatically, not marked' })
+  })
+  it('setting a kind needs this Mac\'s local exec consent', () => {
+    expect(act('P1', { kind: 'devin' }, ['P1'], { allowExec: false })).toEqual({ status: 'failed', outcome: MARK_NEEDS_EXEC })
+    expect(MARK_NEEDS_EXEC).toBe('marking panes from HQ needs `termbus bridge --allow-exec` on this Mac')
+    expect(loadMarks(path)).toEqual({})
+  })
+  it('the Conductor can never mark a pane, even with consent', () => {
+    expect(act('P1', { kind: 'devin' }, ['P1'], { origin: 'conductor' })).toMatchObject({ status: 'failed', outcome: expect.stringMatching(/not the Conductor/) })
+    expect(act('P1', { kind: 'devin' }, ['P1'], { origin: 'user' }).status).toBe('done')
+  })
+  it('unmarking is always allowed — no consent, any origin', () => {
+    act('P1', { kind: 'devin' })
+    expect(act('P1', { kind: null }, ['P1'], { allowExec: false, origin: 'conductor' })).toEqual({ status: 'done', outcome: 'unmarked' })
+    expect(loadMarks(path)).toEqual({})
   })
   it('refuses unknown kinds, closed panes and junk without touching the file', () => {
     expect(act('P1', { kind: 'aider' })).toMatchObject({ status: 'failed', outcome: expect.stringMatching(/unknown agent kind/) })

@@ -94,7 +94,7 @@ interface HqAction {
   promptFingerprint: string | null
   /** the conversation (chat) this action is meant for — the pane must still run it */
   sessionId?: string | null
-  /** send only: who wrote the message — the user, or HQ's Conductor (an AI
+  /** send/mark: who asked — the user, or HQ's Conductor (an AI
    *  acting for the user). Missing = the user (older HQ). */
   origin?: string
 }
@@ -229,10 +229,18 @@ export async function executeSpawn(
  * HQ marks a pane as an agent kind (payload {kind}) or clears the mark
  * ({kind: null}). Clearing only removes a manual mark — a pane detected by
  * process can't be "unmarked".
+ *
+ * Marking makes HQ `send` type into the pane, so a remote mark on an ssh /
+ * psql / REPL pane would be a way around the exec consent tiers. Setting a
+ * kind therefore needs this Mac's local exec consent and must come from the
+ * user, never the Conductor. Unmarking only removes access: always allowed.
  */
+export const MARK_NEEDS_EXEC = 'marking panes from HQ needs `termbus bridge --allow-exec` on this Mac'
+
 export function executeMark(
-  action: Pick<HqAction, 'paneId' | 'payload'>,
+  action: Pick<HqAction, 'paneId' | 'payload' | 'origin'>,
   openPaneIds: string[],
+  consent: { allowExec: boolean },
   path = marksFile(),
 ): { status: string; outcome?: string } {
   let body: { kind?: unknown }
@@ -251,6 +259,8 @@ export function executeMark(
       updateMarks((m) => applyMark(m, paneId, null), path)
       return { status: 'done', outcome: 'unmarked' }
     }
+    if (hqSenderLabel(action.origin) !== 'hq') return { status: 'failed', outcome: 'only the user can mark panes from HQ, not the Conductor' }
+    if (!consent.allowExec) return { status: 'failed', outcome: MARK_NEEDS_EXEC }
     if (!openPaneIds.includes(paneId)) return { status: 'failed', outcome: 'pane no longer exists' }
     updateMarks((m) => applyMark(m, paneId, kind), path)
     return { status: 'done', outcome: `marked as ${kind}` }
@@ -332,7 +342,11 @@ async function executeAction(
     return spawnCtx ? executeSpawn(backend, action, spawnCtx) : { status: 'failed', outcome: 'spawning is not enabled' }
   }
   if (action.kind === 'org') return executeOrg(action)
-  if (action.kind === 'mark') return executeMark(action, (await backend.listPanes()).map((p) => p.id))
+  if (action.kind === 'mark') {
+    // consent read fresh, like exec: a toggle applies without a restart
+    const allowExec = readConfig().allowExec === true
+    return executeMark(action, (await backend.listPanes()).map((p) => p.id), { allowExec })
+  }
   if (action.kind === 'exec') {
     const cfg = readConfig() // fresh: toggles apply without a restart
     return executeExec(action, { allowExec: cfg.allowExec === true, allowAutoExec: cfg.allowAutoExec === true })
