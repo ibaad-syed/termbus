@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir, userInfo } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs, promisify } from 'node:util'
@@ -9,6 +9,8 @@ import { detectBackend } from '../backends/detect.js'
 import { defaultClock } from '../core/ask.js'
 import { ensureDeliverable, isAgentKind, paneState } from '../core/delivery.js'
 import { Cadence, paneDigest } from '../core/cadence.js'
+import { parseSpawnRequest, SPAWN_LIMIT, SPAWN_WINDOW_MS, SpawnLimiter, spawnShellLine } from '../core/spawn.js'
+import { launchScript } from '../restore/resume-command.js'
 import { buildEnvelope, envelopeId } from '../core/envelope.js'
 import { TermbusError } from '../core/errors.js'
 import { occupantForTty } from '../core/occupant.js'
@@ -51,7 +53,7 @@ interface HqAction {
   id: number
   paneId: string
   paneLabel: string
-  kind: 'approve' | 'reject' | 'send' | 'rename' | 'answer'
+  kind: 'approve' | 'reject' | 'send' | 'rename' | 'answer' | 'spawn'
   payload: string | null
   promptFingerprint: string | null
 }
@@ -134,11 +136,46 @@ export async function executeAnswer(
   return runAnswerSteps(backend, pane.id, planAnswerSteps(q.agent, q.items, answers), clock)
 }
 
+/** State for `spawn` actions: the rate limit, and the window new agents
+ *  open in (one window of tabs, not a window per agent). */
+export interface SpawnContext {
+  limiter: SpawnLimiter
+  anchorPaneId: string | null
+}
+
+export async function executeSpawn(
+  backend: Backend,
+  action: Pick<HqAction, 'id' | 'payload'>,
+  ctx: SpawnContext,
+  now = Date.now(),
+): Promise<{ status: string; outcome?: string }> {
+  const req = parseSpawnRequest(action.payload)
+  if ('error' in req) return { status: 'failed', outcome: req.error }
+  if (!backend.createWindow || !backend.createTab) return { status: 'failed', outcome: `the ${backend.name} backend cannot create panes` }
+  if (!ctx.limiter.take(now)) return { status: 'failed', outcome: `spawn limit reached (${SPAWN_LIMIT} per ${SPAWN_WINDOW_MS / 60_000} min)` }
+  const dir = join(homedir(), '.termbus', 'launch')
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const script = join(dir, `spawn-${action.id}.sh`)
+  const shell = userInfo().shell || process.env.SHELL || '/bin/zsh'
+  writeFileSync(script, launchScript(shell, spawnShellLine(req)), { mode: 0o700 })
+  chmodSync(script, 0o700)
+  const command = /\s/.test(script) ? `"${script}"` : script
+  const anchorAlive = ctx.anchorPaneId !== null && (await backend.listPanes()).some((p) => p.id === ctx.anchorPaneId)
+  const paneId = anchorAlive ? await backend.createTab(ctx.anchorPaneId!, { command }) : await backend.createWindow({ command })
+  ctx.anchorPaneId = paneId
+  if (req.name && backend.setPaneName) await backend.setPaneName(paneId, req.name).catch(() => {})
+  return { status: 'done', outcome: paneId }
+}
+
 async function executeAction(
   backend: Backend,
   action: HqAction,
   feeder: TranscriptFeeder | null = null,
+  spawnCtx: SpawnContext | null = null,
 ): Promise<{ status: string; outcome?: string }> {
+  if (action.kind === 'spawn') {
+    return spawnCtx ? executeSpawn(backend, action, spawnCtx) : { status: 'failed', outcome: 'spawning is not enabled' }
+  }
   const panes = await backend.listPanes()
   const pane = panes.find((p) => p.id === action.paneId)
   if (!pane) return { status: 'failed', outcome: 'pane no longer exists' }
@@ -281,6 +318,7 @@ export async function cmdBridge(argv: string[]): Promise<void> {
   // panes we delivered a send to and owe HQ the agent's reply
   const awaitingReply = new Map<string, { label: string; since: number; sawBusy: boolean }>()
   const cadence = new Cadence()
+  const spawnCtx: SpawnContext = { limiter: new SpawnLimiter(), anchorPaneId: null }
   for (;;) {
     try {
       const allPanes = await backend.listPanes()
@@ -376,7 +414,7 @@ export async function cmdBridge(argv: string[]): Promise<void> {
         // someone has HQ open (a live chat): answer their messages within a second
         if (hot) cadence.activity(Date.now())
         for (const action of actions) {
-          const result = await executeAction(backend, action, feeder).catch((e: unknown) => ({
+          const result = await executeAction(backend, action, feeder, spawnCtx).catch((e: unknown) => ({
             status: 'failed',
             outcome: e instanceof Error ? e.message : String(e),
           }))
