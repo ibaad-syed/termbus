@@ -2,7 +2,7 @@ import { parseArgs } from 'node:util'
 import { detectBackend } from '../backends/detect.js'
 import { TermbusError } from '../core/errors.js'
 import { occupantForTty } from '../core/occupant.js'
-import { applyOrgOp, loadOrg, saveOrg, type OrgOp } from '../core/org.js'
+import { applyOrgOp, loadOrg, updateOrg, type OrgOp } from '../core/org.js'
 import { resolveTarget } from '../core/resolve.js'
 
 const USAGE = `usage: termbus dept <command>
@@ -45,7 +45,7 @@ export async function cmdDept(argv: string[]): Promise<void> {
     default:
       throw new TermbusError(`unknown dept command "${sub}"\n${USAGE}`)
   }
-  saveOrg(applyOrgOp(loadOrg(), op))
+  updateOrg((org) => applyOrgOp(org, op))
   const verb = { create: 'created', delete: 'deleted', rename: 'renamed', add: 'added to', remove: 'removed from' }[op.op]
   console.log(op.op === 'add' || op.op === 'remove' ? `${op.paneIds.length} pane(s) ${verb} ${name}` : `department ${name} ${verb}`)
 }

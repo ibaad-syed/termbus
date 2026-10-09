@@ -83,3 +83,30 @@ describe('resolveGroupTargets', () => {
     expect(isGroupSpec('w1.t1.p1')).toBe(false)
   })
 })
+
+describe('review round 3: org robustness', () => {
+  it('loadOrg tolerates hand-edited junk', async () => {
+    const { mkdtempSync, writeFileSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { loadOrg } = await import('../src/core/org.js')
+    const f = join(mkdtempSync(join(tmpdir(), 'termbus-orgj-')), 'org.json')
+    writeFileSync(f, JSON.stringify({ v: 1, departments: [{ name: 'ok', members: ['A', 3] }, { name: 'bad' }, null] }))
+    expect(loadOrg(f).departments).toEqual([{ name: 'ok', members: ['A'], createdAt: 0 }])
+  })
+  it('updateOrg serialises edits', async () => {
+    const { mkdtempSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { updateOrg, loadOrg } = await import('../src/core/org.js')
+    const f = join(mkdtempSync(join(tmpdir(), 'termbus-orgl-')), 'org.json')
+    updateOrg((o) => applyOrgOp(o, { op: 'create', department: 'a' }), f)
+    updateOrg((o) => applyOrgOp(o, { op: 'create', department: 'b' }), f)
+    expect(loadOrg(f).departments.map((d) => d.name)).toEqual(['a', 'b'])
+  })
+  it('a comma inside a real pane title is not a group', () => {
+    const panes = [pane('A', 1, { title: 'foo, bar' })]
+    expect(isGroupSpec('foo, bar', panes)).toBe(false)
+    expect(isGroupSpec('w1.t1.p1,w1.t1.p1', panes)).toBe(true)
+  })
+})

@@ -44,7 +44,9 @@ describe('hardenGit', () => {
   it('turns off pagers, fsmonitor, external diff and textconv', () => {
     expect(hardenGit(['git', 'diff', '--stat'])).toEqual([
       'git', '--no-pager', '-c', 'core.pager=cat', '-c', 'core.fsmonitor=false', '-c', 'diff.external=',
-      '-c', 'log.showSignature=false', '-c', 'gpg.program=false', 'diff', '--no-ext-diff', '--no-textconv', '--stat',
+      '-c', 'log.showSignature=false', '-c', 'gpg.program=false',
+      '-c', 'submodule.recurse=false', '-c', 'diff.ignoreSubmodules=all', '-c', 'status.submoduleSummary=false',
+      'diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=all', '--stat',
     ])
     expect(hardenGit(['ps', 'aux'])).toEqual(['ps', 'aux'])
   })
@@ -176,5 +178,52 @@ describe('runExec timeout kills the process group', () => {
     const pid = Number(readFileSync(join(dir, 'child.pid'), 'utf8'))
     await new Promise((res) => setTimeout(res, 300))
     expect(() => process.kill(pid, 0)).toThrow()
+  }, 10_000)
+})
+
+describe('review round 3: git cannot read files or descend into submodules', () => {
+  it('path arguments outside the repo are refused', () => {
+    expect(readOnlyViolation(['git', 'diff', '/dev/null', '/Users/x/.termbus/config.json'])).not.toBeNull()
+    expect(readOnlyViolation(['git', 'diff', '../../.ssh/id_rsa'])).not.toBeNull()
+    expect(readOnlyViolation(['git', 'diff', '~/.ssh/id_rsa'])).not.toBeNull()
+    expect(readOnlyViolation(['git', 'diff', 'main..feature/x'])).toBeNull()
+    expect(readOnlyViolation(['git', 'log', '--oneline', 'origin/main'])).toBeNull()
+  })
+  it('hardened git never recurses into submodules', () => {
+    const a = hardenGit(['git', 'status'])
+    expect(a).toEqual(expect.arrayContaining(['submodule.recurse=false', 'diff.ignoreSubmodules=all', '--ignore-submodules=all']))
+  })
+  it('outside a work tree, or with submodules → needs approval (the reviewer\'s reproductions)', async () => {
+    const { execFileSync } = await import('node:child_process')
+    const { writeFileSync } = await import('node:fs')
+    const plain = mkdtempSync(join(tmpdir(), 'termbus-norepo-'))
+    expect(await gitConfigRisk(plain)).toMatch(/not inside a git work tree/)
+    const repo = mkdtempSync(join(tmpdir(), 'termbus-sub-'))
+    execFileSync('git', ['init', '-q'], { cwd: repo })
+    expect(await gitConfigRisk(repo)).toBeNull()
+    writeFileSync(join(repo, '.gitmodules'), '[submodule "x"]\n\tpath = x\n\turl = ./x\n')
+    expect(await gitConfigRisk(repo)).toMatch(/submodules/)
+  })
+})
+
+describe('review round 3: redaction', () => {
+  it('more shapes, redacted before capping', () => {
+    expect(redactSecrets('{"token": "abc123", "secret":"s3"}')).toBe('{"token": "***", "secret":"***"}')
+    expect(redactSecrets('npm_abcdefghijklmnopqrstuvwxyz12')).toBe('npm_***')
+    expect(redactSecrets('AKIAABCDEFGHIJKLMNOP')).toBe('AKIA_***')
+    expect(redactSecrets('api_key=xyz')).toBe('api_key=***')
+    expect(redactSecrets('Authorization: token abcdefghijklmnop')).toBe('Authorization: token ***')
+    expect(redactSecrets('-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----')).toBe('-----BEGIN PRIVATE KEY----- *** (redacted)')
+  })
+})
+
+describe('review round 3: a detached child holding the pipes cannot wedge exec', () => {
+  it('settles shortly after the command exits', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'termbus-wedge-'))
+    const t0 = Date.now()
+    // the grandchild keeps stdout open for 30s in its own session
+    const r = await runExec({ kind: 'shell', command: '(setsid sleep 30 2>/dev/null || nohup sleep 30) & echo started', cwd: dir, approvedBy: 'user' }, '/bin/sh', { timeoutMs: 5000 })
+    expect(Date.now() - t0).toBeLessThan(4000)
+    expect(r.stdout).toContain('started')
   }, 10_000)
 })

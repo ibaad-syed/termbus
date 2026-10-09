@@ -44,7 +44,7 @@ Running a lot of agents? Group them like a company — `api`, `frontend`, `media
 ```sh
 termbus dept create api
 termbus dept add api w1.t2.p1 "billing"    # any targets; `self` adds the current pane
-termbus dept list                          # teams and who's in them; `termbus list` tags panes [@api]
+termbus dept list                          # teams and who's in them (`termbus list --json` has each pane's department)
 termbus broadcast @api "the schema changed — rebase and rerun migrations"
 termbus broadcast @all "stop and commit what you have"
 termbus send a,b,c "same message to three agents"

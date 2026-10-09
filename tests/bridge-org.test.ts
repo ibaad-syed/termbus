@@ -25,3 +25,12 @@ describe('executeOrg (HQ edits departments on this Mac)', () => {
     expect(loadOrg().departments).toEqual([])
   })
 })
+
+describe('org payload limits', () => {
+  it('rejects oversized or malformed paneIds', () => {
+    act({ op: 'create', department: 'api' })
+    expect(act({ op: 'add', department: 'api', paneIds: Array.from({ length: 65 }, (_, i) => `P${i}`) }).status).toBe('failed')
+    expect(act({ op: 'add', department: 'api', paneIds: ['x'.repeat(201)] }).status).toBe('failed')
+    expect(act({ op: 'add', department: 'api', paneIds: ['../../etc'] }).status).toBe('failed')
+  })
+})

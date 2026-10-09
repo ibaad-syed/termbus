@@ -33,7 +33,7 @@ export async function cmdList(argv: string[]): Promise<void> {
     const state = p.state === 'awaiting-input' ? 'input!' : (p.state ?? '-')
     const title = p.title.length > 46 ? `${p.title.slice(0, 45)}…` : p.title
     console.log(
-      `${p.label.padEnd(10)} ${p.occupant.padEnd(9)} ${state.padEnd(7)} ${p.tty.replace('/dev/', '').padEnd(10)} ${title}${p.department ? `  [@${p.department}]` : ''}${p.isSelf ? '  (self)' : ''}`,
+      `${p.label.padEnd(10)} ${p.occupant.padEnd(9)} ${state.padEnd(7)} ${p.tty.replace('/dev/', '').padEnd(10)} ${title}${p.isSelf ? '  (self)' : ''}`,
     )
   }
 }

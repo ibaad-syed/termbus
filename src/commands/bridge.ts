@@ -10,7 +10,7 @@ import { defaultClock } from '../core/ask.js'
 import { ensureDeliverable, isAgentKind, paneState } from '../core/delivery.js'
 import { Cadence, paneDigest } from '../core/cadence.js'
 import { gitConfigRisk, parseExecRequest, runExec } from '../core/exec.js'
-import { applyOrgOp, loadOrg, saveOrg, type OrgOp } from '../core/org.js'
+import { applyOrgOp, loadOrg, updateOrg, type OrgOp } from '../core/org.js'
 import { packageRoot } from './install-skill.js'
 import { parseSpawnRequest, SPAWN_LIMIT, SPAWN_WINDOW_MS, SpawnLimiter, spawnShellLine } from '../core/spawn.js'
 import { launchScript } from '../restore/resume-command.js'
@@ -208,12 +208,14 @@ export function executeOrg(action: Pick<HqAction, 'payload'>): { status: string;
     return { status: 'failed', outcome: 'org payload is not JSON' }
   }
   if (!['create', 'delete', 'rename', 'add', 'remove'].includes(op?.op)) return { status: 'failed', outcome: 'unknown org op' }
-  if ((op.op === 'add' || op.op === 'remove') && (!Array.isArray(op.paneIds) || !op.paneIds.every((x) => typeof x === 'string'))) {
-    return { status: 'failed', outcome: 'paneIds must be a list of pane ids' }
+  if (
+    (op.op === 'add' || op.op === 'remove') &&
+    (!Array.isArray(op.paneIds) || op.paneIds.length > 64 || !op.paneIds.every((x) => typeof x === 'string' && /^[\w-]{1,200}$/.test(x)))
+  ) {
+    return { status: 'failed', outcome: 'paneIds must be a list of up to 64 pane ids' }
   }
   try {
-    const next = applyOrgOp(loadOrg(), op)
-    saveOrg(next)
+    const next = updateOrg((org) => applyOrgOp(org, op))
     return { status: 'done', outcome: JSON.stringify(next) }
   } catch (e) {
     return { status: 'failed', outcome: e instanceof Error ? e.message : String(e) }
@@ -302,7 +304,15 @@ async function executeAction(
       'queue',
       { timeoutMs: 0, pollMs: 1000 },
     )
-    const enveloped = `${buildEnvelope({ label: 'hq', kind: 'shell' }, envelopeId())} ${action.payload}`
+    // one line only: if the agent exits mid-send, a newline would run the first line in the shell
+    const text = action.payload.replace(/[\r\n]+/g, ' ')
+    const enveloped = `${buildEnvelope({ label: 'hq', kind: 'shell' }, envelopeId())} ${text}`
+    // re-check right before typing: the wait above may have spanned a dialog or an exit
+    const before = await occupantForTty(pane.tty)
+    if (!isAgentKind(before.kind)) return { status: 'failed', outcome: 'no agent is running in that pane any more' }
+    if (paneState(before, await backend.readScreen(pane.id)) === 'awaiting-input') {
+      return { status: 'failed', outcome: 'the agent is showing a prompt — answer it first' }
+    }
     await backend.sendText(pane.id, enveloped, false)
     // Enter goes separately (TUIs treat text+CR as a paste) — and only if no
     // dialog popped up meanwhile, where Enter would answer it.

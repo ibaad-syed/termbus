@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process'
 import { realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, sep } from 'node:path'
+import { isAbsolute, join, sep } from 'node:path'
 
 /**
  * HQ's conductor can run commands on this Mac. Two tiers, enforced HERE (the
@@ -65,6 +65,12 @@ export function readOnlyViolation(argv: string[]): string | null {
       }
       if (args.some((x) => /^--(output|ext-diff|textconv|exec|no-index|show-signature)/.test(x) || x === '-c')) return 'option not allowed'
       if (args.some((x) => /%G/.test(x))) return 'signature formats run gpg'
+      // revisions and in-repo paths only: no absolute paths, no `..` segments,
+      // no `~` (outside a repo `git diff a b` silently reads ANY two files)
+      for (const x of args.slice(1)) {
+        if (x.startsWith('-')) continue
+        if (x.startsWith('/') || x.startsWith('~') || x.split('/').includes('..')) return `path ${x} is outside the repo`
+      }
       // `git show HEAD:path` prints file contents — reading files needs approval
       if (sub === 'show' && args.slice(1).some((x) => x.includes(':'))) return 'git show of file contents needs approval'
       return null
@@ -79,11 +85,14 @@ export function hardenGit(argv: string[]): string[] {
   if (argv[0] !== 'git') return argv
   const [, sub, ...rest] = argv
   const extra = sub === 'diff' || sub === 'show' || sub === 'log' ? ['--no-ext-diff', '--no-textconv'] : []
+  // submodules have their own config (filters etc.): never descend into them
+  const noSub = sub === 'status' || sub === 'diff' ? ['--ignore-submodules=all'] : []
   return [
     'git', '--no-pager',
     '-c', 'core.pager=cat', '-c', 'core.fsmonitor=false', '-c', 'diff.external=',
     '-c', 'log.showSignature=false', '-c', 'gpg.program=false',
-    sub, ...extra, ...rest,
+    '-c', 'submodule.recurse=false', '-c', 'diff.ignoreSubmodules=all', '-c', 'status.submoduleSummary=false',
+    sub, ...extra, ...noSub, ...rest,
   ]
 }
 
@@ -109,15 +118,33 @@ export function riskyLocalGitConfig(listing: string): string | null {
   return null
 }
 
-export async function gitConfigRisk(cwd: string): Promise<string | null> {
+function gitOut(cwd: string, args: string[]): Promise<{ ok: boolean; out: string }> {
   return new Promise((resolve) => {
-    execFile(
-      'git',
-      ['config', '--list', '--includes', '--show-scope'],
-      { cwd, timeout: 5000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } },
-      (err, stdout) => resolve(err && !stdout ? null : riskyLocalGitConfig(String(stdout))),
-    )
+    execFile('git', args, { cwd, timeout: 5000, env: execEnv() }, (err, stdout) => resolve({ ok: !err, out: String(stdout ?? '') }))
   })
+}
+
+/**
+ * Why a git command is NOT read-only in this directory, or null if it is.
+ * Fails closed: if anything can't be determined, it needs approval.
+ * - not inside a work tree: `git diff a b` would read arbitrary files;
+ * - submodules: each has its own config, which could run programs;
+ * - repo-local config that runs programs (see riskyLocalGitConfig).
+ */
+export async function gitConfigRisk(cwd: string): Promise<string | null> {
+  const inside = await gitOut(cwd, ['rev-parse', '--is-inside-work-tree'])
+  if (!inside.ok || inside.out.trim() !== 'true') return 'not inside a git work tree'
+  const top = await gitOut(cwd, ['rev-parse', '--show-toplevel'])
+  if (!top.ok) return 'could not inspect the repo'
+  try {
+    statSync(join(top.out.trim(), '.gitmodules'))
+    return 'the repo has submodules (each with its own config)'
+  } catch {
+    // no submodules
+  }
+  const cfg = await gitOut(cwd, ['config', '--list', '--includes', '--show-scope'])
+  if (!cfg.ok) return 'could not inspect the repo\'s git config'
+  return riskyLocalGitConfig(cfg.out)
 }
 
 export type ExecRequest =
@@ -197,8 +224,11 @@ export function redactSecrets(text: string): string {
     .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)([^\s/@:]{16,})@/gi, '$1***@')
     .replace(/(--?(?:token|secret|password|passwd|pass|api[-_]?key|auth|access[-_]?key|bearer)(?:=|\s+))(\S+)/gi, '$1***')
     .replace(/\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]*)=(\S+)/g, '$1=***')
-    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}/g, '$1***')
-    .replace(/\b(sk|pk|ghp|gho|ghs|xox[abprs]|vck|vcp)[-_][A-Za-z0-9_-]{16,}/g, '$1_***')
+    .replace(/\b([a-z0-9_]*(?:token|secret|password|passwd|api_?key|apikey|access_key|private_key|authtoken)[a-z0-9_]*)=(\S+)/gi, '$1=***')
+    .replace(/("(?:[a-z0-9_]*(?:token|secret|password|passwd|api_?key|apikey|access_?key|private_?key|authtoken))"\s*:\s*)"[^"]*"/gi, '$1"***"')
+    .replace(/\b((?:Bearer|token|Basic)\s+)[A-Za-z0-9._~+/=-]{12,}/gi, '$1***')
+    .replace(/\b(sk|pk|ghp|gho|ghs|ghu|github_pat|xox[abprs]|vck|vcp|npm|glpat|AKIA|ASIA)[-_]?[A-Za-z0-9_-]{16,}/g, '$1_***')
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, '-----BEGIN PRIVATE KEY----- *** (redacted)')
 }
 
 /** Environment for commands: no termbus/HQ credentials. */
@@ -247,16 +277,27 @@ export async function runExec(
       clearTimeout(timer)
       resolve({
         exitCode: code,
-        stdout: redactSecrets(cap(out)),
-        stderr: redactSecrets(cap(err)),
+        stdout: cap(redactSecrets(out)),
+        stderr: cap(redactSecrets(err)),
         truncated: truncated || Buffer.byteLength(out) > OUTPUT_CAP || Buffer.byteLength(err) > OUTPUT_CAP,
         timedOut,
       })
     }
+    let done = false
+    const settle = (code: number) => {
+      if (done) return
+      done = true
+      child.stdout.destroy()
+      child.stderr.destroy()
+      finish(code)
+    }
     child.on('error', (e) => {
       err += e.message
-      finish(127)
+      settle(127)
     })
-    child.on('close', (code, signal) => finish(code ?? (signal ? 128 : 1)))
+    // 'close' waits for every holder of the pipes — a detached grandchild can
+    // keep them open forever. Settle shortly after the command itself exits.
+    child.on('exit', (code, signal) => setTimeout(() => settle(code ?? (signal ? 128 : 1)), 500).unref())
+    child.on('close', (code, signal) => settle(code ?? (signal ? 128 : 1)))
   })
 }

@@ -6,7 +6,7 @@ import { detectBackend } from '../backends/detect.js'
 import { defaultClock } from '../core/ask.js'
 import { TermbusError } from '../core/errors.js'
 import type { Backend } from '../core/types.js'
-import { loadOrg, remapMembers, saveOrg } from '../core/org.js'
+import { remapMembers, updateOrg } from '../core/org.js'
 import { liveAgents, snapshotFile, terminalInstance } from '../restore/capture.js'
 import { describeTree, planRestore, tabLayout, type LeafSpec } from '../restore/plan.js'
 import { firstLeaf, type SplitTree } from '../restore/layout.js'
@@ -196,7 +196,7 @@ async function runRestore(backend: Backend, gen: Generation, dryRun: boolean): P
     }
   }
   console.log(`reopened ${opened.length} agent pane${opened.length === 1 ? '' : 's'}`)
-  if (remap.size > 0) saveOrg(remapMembers(loadOrg(), remap))
+  if (remap.size > 0) updateOrg((org) => remapMembers(org, remap))
   // hold the lock until the agents are visibly running, so a second restore
   // started right now cannot mistake them for missing and open them again
   const deadline = Date.now() + 30_000

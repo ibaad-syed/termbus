@@ -31,7 +31,7 @@ export async function cmdSend(argv: string[]): Promise<void> {
   const [target, ...textParts] = positionals
   const text = textParts.join(' ')
   if (!target || !text) throw new TermbusError(USAGE)
-  if (isGroupSpec(target)) {
+  if (isGroupSpec(target, target.startsWith('@') ? undefined : await detectBackend().listPanes())) {
     // "@api", "@all", "a,b,c": one message to many agents (see `broadcast`)
     if (values.raw || values['no-submit']) throw new TermbusError('--raw/--no-submit work with a single target only')
     const r = await deliverToMany(target, text, resolveMode(values), {

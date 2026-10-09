@@ -62,7 +62,13 @@ export async function deliverToMany(
         mode,
         { timeoutMs: opts.timeoutMs, pollMs: 1000 },
       )
-      const body = `${prefix}${text}`
+      // re-check right before typing: waiting for idle can take minutes, and
+      // an agent that exited leaves a shell that would run the text
+      if (!isAgentKind((await occupantForTty(pane.tty)).kind)) {
+        reports.push({ pane, result: 'skipped', reason: 'the agent exited' })
+        continue
+      }
+      const body = `${prefix}${text.replace(/[\r\n]+/g, ' ')}`
       const payload = opts.plain ? body : `${buildEnvelope({ label: selfLabel, kind: senderKind }, envelopeId())} ${body}`
       await backend.sendText(pane.id, payload, true)
       reports.push({ pane, result: outcome === 'queued' ? 'queued' : 'sent' })

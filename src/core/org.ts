@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { TermbusError } from './errors.js'
@@ -35,11 +35,54 @@ export function emptyOrg(): Org {
 export function loadOrg(path = orgFile()): Org {
   try {
     const o = JSON.parse(readFileSync(path, 'utf8')) as Org
-    if (o.v === 1 && Array.isArray(o.departments)) return o
+    if (o.v === 1 && Array.isArray(o.departments)) {
+      // tolerate hand edits: keep only well-formed departments
+      return {
+        v: 1,
+        departments: o.departments
+          .filter((d) => d && typeof d.name === 'string' && Array.isArray(d.members))
+          .map((d) => ({ name: d.name, members: d.members.filter((m) => typeof m === 'string'), createdAt: Number(d.createdAt) || 0 })),
+      }
+    }
   } catch {
     // missing or corrupt
   }
   return emptyOrg()
+}
+
+/**
+ * Read-modify-write under a lock, so the CLI, the bridge (HQ edits) and
+ * restore can't overwrite each other's changes. The lock is a directory
+ * (atomic mkdir); a stale one (crashed holder) is broken after 10s.
+ */
+export function updateOrg(fn: (org: Org) => Org, path = orgFile()): Org {
+  const lock = `${path}.lock`
+  mkdirSync(dirname(path), { recursive: true })
+  const deadline = Date.now() + 5000
+  for (;;) {
+    try {
+      mkdirSync(lock)
+      break
+    } catch {
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > 10_000) rmSync(lock, { recursive: true, force: true })
+      } catch {
+        // released meanwhile
+      }
+      if (Date.now() > deadline) throw new TermbusError('departments are being edited elsewhere — try again')
+      const until = Date.now() + 25
+      while (Date.now() < until) {
+        // brief spin; edits are tiny
+      }
+    }
+  }
+  try {
+    const next = fn(loadOrg(path))
+    saveOrg(next, path)
+    return next
+  } finally {
+    rmSync(lock, { recursive: true, force: true })
+  }
 }
 
 export function saveOrg(org: Org, path = orgFile()): void {
@@ -152,6 +195,19 @@ export function resolveGroupTargets(
   return { panes: [...out.values()], group: parts.length === 1 && parts[0].startsWith('@') ? parts[0] : null, missing }
 }
 
-export function isGroupSpec(target: string): boolean {
-  return target.trim().startsWith('@') || target.includes(',')
+/**
+ * "@dept" / "@all" are always groups. A comma list is a group only if the
+ * whole string is not itself a target (a pane titled "foo, bar" still works).
+ */
+export function isGroupSpec(target: string, panes?: Pane[]): boolean {
+  const t = target.trim()
+  if (t.startsWith('@')) return true
+  if (!t.includes(',')) return false
+  if (!panes) return true
+  try {
+    resolveTarget(panes, t)
+    return false
+  } catch {
+    return true
+  }
 }
