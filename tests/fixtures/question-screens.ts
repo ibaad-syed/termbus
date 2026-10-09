@@ -80,9 +80,7 @@ export function claudeTwoReview(toppings: string): string {
     'Ready to submit your answers? ',
     '      ',
     '❯ 1. Submit answers ',
-    '  2. Cancel ',
-    ' ',
-    'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+    '  2. Cancel ', // the review tab has no key-hint footer (live capture)
   ].join('\n')
 }
 

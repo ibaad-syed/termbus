@@ -52,7 +52,15 @@ export function looksLikeQuestionDialog(kind: AgentKind, screen: string): boolea
   // (joined with spaces, whitespace collapsed: in a narrow pane the footer wraps)
   const lastLines = lines.filter((l) => l.trim()).slice(-4).join(' ').replace(/\s+/g, ' ')
   const m = QUESTION_MARKERS[kind]
-  return m.footer.test(lastLines) && m.body.test(tail)
+  if (m.footer.test(lastLines) && m.body.test(tail)) return true
+  // Claude's review tab has no key-hint footer (seen live): it ends with the
+  // "1. Submit answers / 2. Cancel" choice under "Ready to submit your answers?"
+  return (
+    kind === 'claude' &&
+    /Ready to submit your answers\? .*1\. Submit answers .*2\. Cancel\s*$/.test(lastLines) &&
+    /Review your answers/.test(tail) &&
+    /[☐☒]/.test(tail)
+  )
 }
 
 /** Question dialogs are taller than permission prompts (options + descriptions). */

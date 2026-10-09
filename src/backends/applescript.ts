@@ -274,6 +274,23 @@ export function parseGeometryOutput(raw: string): Map<string, PaneGeometry> {
   return out
 }
 
+/**
+ * iTerm raises -1719 "Invalid index" when a window/tab/session disappears
+ * while a script is walking `every window` (another app opening or closing
+ * panes at the same moment). The list/read/send scripts only act once they
+ * reach the target, so an error mid-walk means nothing happened yet — retry.
+ */
+async function osascriptRetrying(script: string, args: string[], attempts = 3): Promise<string> {
+  for (let i = 1; ; i++) {
+    try {
+      return await osascript(script, args)
+    } catch (err) {
+      if (i >= attempts || !(err instanceof Error) || !err.message.includes('(-1719)')) throw err
+      await new Promise((r) => setTimeout(r, 150 * i))
+    }
+  }
+}
+
 async function osascript(script: string, args: string[]): Promise<string> {
   try {
     const { stdout } = await execFileP('osascript', ['-e', script, ...args], {
@@ -337,7 +354,7 @@ export class AppleScriptBackend implements Backend {
   constructor(private readonly selfSessionId: string | null) {}
 
   async listPanes(): Promise<Pane[]> {
-    const raw = await osascript(LIST_SCRIPT, [])
+    const raw = await osascriptRetrying(LIST_SCRIPT, [])
     return parseListOutput(raw, this.selfSessionId)
   }
 
@@ -347,11 +364,11 @@ export class AppleScriptBackend implements Backend {
   }
 
   async readScreen(paneId: string): Promise<string> {
-    return osascript(READ_SCRIPT, [paneId])
+    return osascriptRetrying(READ_SCRIPT, [paneId])
   }
 
   async sendText(paneId: string, text: string, submit: boolean): Promise<void> {
-    await osascript(SEND_SCRIPT, [paneId, text, submit ? '1' : '0'])
+    await osascriptRetrying(SEND_SCRIPT, [paneId, text, submit ? '1' : '0'])
   }
 
   async setPaneName(paneId: string, name: string): Promise<void> {
