@@ -1,5 +1,5 @@
 import type { TranscriptQuestionItem } from '../transcripts/types.js'
-import { looksLikeQuestionDialog, QUESTION_TAIL_LINES } from './idle.js'
+import { findClaudeTabBar, looksLikeQuestionDialog, QUESTION_TAIL_LINES } from './idle.js'
 import type { AgentKind, Backend } from './types.js'
 
 /**
@@ -90,12 +90,12 @@ function tailOf(screen: string): string[] {
 /** Text of the dialog below its last header line (Claude tab bar / Codex progress line). */
 function dialogBody(agent: AgentKind, screen: string): { header: string; body: string } | null {
   const lines = tailOf(screen)
-  const isHeader =
-    agent === 'claude'
-      ? (l: string) => /^\s*(←\s+)?[☐☒]\s/.test(l) || /^\s*←\s.*Submit\s+→/.test(l)
-      : (l: string) => /^\s*Question \d+\/\d+/.test(l)
+  if (agent === 'claude') {
+    const i = findClaudeTabBar(lines) // never a TodoWrite ☐/☒ line
+    return i < 0 ? null : { header: lines[i], body: lines.slice(i + 1).join('\n') }
+  }
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (isHeader(lines[i])) return { header: lines[i], body: lines.slice(i + 1).join('\n') }
+    if (/^\s*Question \d+\/\d+/.test(lines[i])) return { header: lines[i], body: lines.slice(i + 1).join('\n') }
   }
   return null
 }
@@ -257,8 +257,13 @@ export function planAnswerSteps(agent: AgentKind, items: TranscriptQuestionItem[
         steps.push({ label: `Q${i + 1}: type free text`, keys: [text], expect: (s) => here(s) && squash(s).includes(squash(`❯${otherRow}.${text}`)) })
       } else {
         steps.push({ label: `Q${i + 1}: focus "None of the above"`, guard: here, keys: [UP], expect: (s) => here(s) && squash(s).includes(squash(`›${otherRow}.None of the above`)) })
-        steps.push({ label: `Q${i + 1}: open notes`, keys: [TAB], expect: (s) => here(s) && squash(s).includes(squash(`›${otherRow}.None of the above`)) })
-        steps.push({ label: `Q${i + 1}: type note`, keys: [text], expect: (s) => here(s) && squash(s).includes(squash(text)) })
+        // the notes field is open only when the footer offers "tab or esc to
+        // clear notes" (codex-rs footer_tips; snapshot options_notes_visible) —
+        // typing into the option list instead would pick/submit options
+        const notesOpen = (s: string) =>
+          here(s) && squash(s).includes(squash(`›${otherRow}.None of the above`)) && /tab or esc to clear notes/.test(tailOf(s).join(' ').replace(/\s+/g, ' '))
+        steps.push({ label: `Q${i + 1}: open notes`, keys: [TAB], expect: notesOpen })
+        steps.push({ label: `Q${i + 1}: type note`, guard: notesOpen, keys: [text], expect: (s) => notesOpen(s) && squash(s).includes(squash(text)) })
       }
       steps.push({ label: `Q${i + 1}: commit free text`, keys: [ENTER], expect: advanced, ...(advanced === gone ? {} : { nudge }) })
     } else {
@@ -315,9 +320,12 @@ export async function runAnswerSteps(
   // within ~0.6s of the previous one (seen live), so steps are paced
   const settleMs = opts.settleMs ?? 900
   const nudgeAfterMs = opts.nudgeAfterMs ?? 1500
-  let screen = await backend.readScreen(paneId)
+  let screen = ''
   let typed = false
   for (const step of steps) {
+    // always judge a step against a fresh read taken after the previous
+    // step's settle pause — the screen can change in between
+    screen = await backend.readScreen(paneId)
     if (step.guard && !step.guard(screen)) {
       return typed
         ? { status: 'failed', outcome: `stopped before "${step.label}": the dialog no longer matched — nothing was submitted, finish it on the Mac` }

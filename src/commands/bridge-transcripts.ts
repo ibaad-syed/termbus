@@ -7,7 +7,8 @@ import { discoverSessions, SessionTailer } from '../transcripts/index.js'
 import type { SessionInfo, TailerState, TranscriptEvent, TranscriptQuestionItem } from '../transcripts/index.js'
 import { occupantForTty } from '../core/occupant.js'
 import type { Pane } from '../core/types.js'
-import { SCREEN_CALL_PREFIX, type ClaudeScreenQuestion } from '../core/claude-question-screen.js'
+import { randomUUID } from 'node:crypto'
+import { screenCallId, type ClaudeScreenQuestion } from '../core/claude-question-screen.js'
 
 const execFileP = promisify(execFile)
 
@@ -207,8 +208,7 @@ export class TranscriptFeeder {
   }
 
   /** paneId → the screen-built question card currently shown in HQ */
-  private screenCards = new Map<string, { callId: string; key: string; info: SessionInfo }>()
-  private screenSeq = 0
+  private screenCards = new Map<string, { callId: string; key: string; fingerprint: string; info: SessionInfo }>()
 
   /**
    * Reconcile a Claude pane's visible AskUserQuestion step with HQ: when the
@@ -218,9 +218,8 @@ export class TranscriptFeeder {
    * the next call (nothing is recorded for it).
    */
   screenQuestionEvents(paneId: string, parsed: ClaudeScreenQuestion | null): Array<{ session: SessionInfo; event: TranscriptEvent }> {
-    const callId = parsed ? SCREEN_CALL_PREFIX + parsed.fingerprint : null
     const prev = this.screenCards.get(paneId)
-    if (prev && prev.callId === callId) return []
+    if (prev && parsed && prev.fingerprint === parsed.fingerprint) return []
     const out: Array<{ session: SessionInfo; event: TranscriptEvent }> = []
     const ev = (info: SessionInfo, key: string, kind: TranscriptEvent['kind'], question: TranscriptEvent['question']): TranscriptEvent => ({
       v: 1,
@@ -238,11 +237,14 @@ export class TranscriptFeeder {
       out.push({ session: prev.info, event: ev(prev.info, `${prev.key}#done`, 'tool_result', { callId: prev.callId, superseded: true }) })
       this.screenCards.delete(paneId)
     }
-    if (!parsed || !callId) return out
+    if (!parsed) return out
     const entry = [...this.links.entries()].find(([, p]) => p === paneId)
     const rec = entry ? this.tailers.get(entry[0]) : undefined
     if (!rec || rec.info.agent !== 'claude') return out
-    const key = `${callId}#${this.screenSeq++}`
+    // a fresh random nonce per showing: unique across repeats AND restarts,
+    // so neither the one-time answer slot nor the event key can collide
+    const callId = screenCallId(paneId, randomUUID().slice(0, 12), parsed.fingerprint)
+    const key = callId
     const question: TranscriptEvent['question'] =
       parsed.step === 'review'
         ? { callId, items: [], screen: { step: 'review', tabs: parsed.tabs, review: parsed.review } }
@@ -264,7 +266,7 @@ export class TranscriptFeeder {
             },
           }
     out.push({ session: rec.info, event: ev(rec.info, key, 'question', question) })
-    this.screenCards.set(paneId, { callId, key, info: rec.info })
+    this.screenCards.set(paneId, { callId, key, fingerprint: parsed.fingerprint, info: rec.info })
     return out
   }
 

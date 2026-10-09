@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { looksLikeQuestionDialog, QUESTION_TAIL_LINES } from './idle.js'
+import { findClaudeTabBar, looksLikeQuestionDialog, QUESTION_TAIL_LINES } from './idle.js'
 import { runAnswerSteps, sanitizeOther, type AnswerOutcome, type AnswerStep, type StepClock } from './question.js'
 import type { Backend } from './types.js'
 
@@ -93,14 +93,8 @@ export function parseClaudeQuestionScreen(screen: string): ClaudeScreenQuestion 
   if (!looksLikeQuestionDialog('claude', screen)) return null
   const lines = screen.split('\n').slice(-QUESTION_TAIL_LINES).map((l) => l.replace(/\s+$/, ''))
 
-  // the tab bar is the last line carrying ☐/☒ boxes
-  let barIdx = -1
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (/^\s*(←\s+)?[☐☒]\s/.test(lines[i])) {
-      barIdx = i
-      break
-    }
-  }
+  // the dialog's tab bar (not TodoWrite's ☐/☒ lines — see findClaudeTabBar)
+  const barIdx = findClaudeTabBar(lines)
   if (barIdx < 0) return null
   // a narrow pane wraps the tab bar: collect continuation lines up to the first blank
   let barEnd = barIdx + 1
@@ -189,8 +183,26 @@ export function parseClaudeQuestionScreen(screen: string): ClaudeScreenQuestion 
   return { ...parsed, fingerprint: fingerprintOf(parsed) }
 }
 
-/** callId namespace for screen-built cards: `screen:<fingerprint>`. */
+/**
+ * Screen-built card ids: `screen:<paneId>:<occurrence nonce>:<step fingerprint>`.
+ * The pane and nonce make every showing of a step unique (the same dialog
+ * asked twice, or seen again after a bridge restart, is a new card — never a
+ * collision with an old card's one-time answer slot or event key); the bridge
+ * only ever compares the fingerprint part against the screen.
+ */
 export const SCREEN_CALL_PREFIX = 'screen:'
+
+export function screenCallId(paneId: string, nonce: string, fingerprint: string): string {
+  return `${SCREEN_CALL_PREFIX}${paneId}:${nonce}:${fingerprint}`
+}
+
+export function parseScreenCallId(callId: string): { paneId: string; nonce: string; fingerprint: string } | null {
+  if (!callId.startsWith(SCREEN_CALL_PREFIX)) return null
+  const parts = callId.slice(SCREEN_CALL_PREFIX.length).split(':')
+  if (parts.length !== 3 || parts.some((x) => !x)) return null
+  const [paneId, nonce, fingerprint] = parts
+  return { paneId, nonce, fingerprint }
+}
 
 // ---------------------------------------------------------------------------
 // Answering one screen step
@@ -298,10 +310,13 @@ export async function executeScreenAnswer(
   answer: ScreenAnswer,
   clock: StepClock,
 ): Promise<AnswerOutcome> {
+  const id = parseScreenCallId(callId)
+  if (!id) return { status: 'failed', outcome: 'malformed screen card id' }
+  if (id.paneId !== paneId) return { status: 'stale', outcome: 'the card belongs to a different pane — nothing was typed' }
   const screen = await backend.readScreen(paneId)
   const p = parseClaudeQuestionScreen(screen)
   if (!p) return { status: 'stale', outcome: 'no question dialog on screen — nothing was typed' }
-  if (SCREEN_CALL_PREFIX + p.fingerprint !== callId) {
+  if (p.fingerprint !== id.fingerprint) {
     return { status: 'stale', outcome: 'the dialog on screen changed — nothing was typed' }
   }
   const invalid = validateScreenAnswer(p, answer)

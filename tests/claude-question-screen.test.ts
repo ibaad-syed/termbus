@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { executeScreenAnswer, parseClaudeQuestionScreen, SCREEN_CALL_PREFIX, validateScreenAnswer } from '../src/core/claude-question-screen.js'
+import { executeScreenAnswer, parseClaudeQuestionScreen, parseScreenCallId, screenCallId, validateScreenAnswer } from '../src/core/claude-question-screen.js'
+import { TranscriptFeeder } from '../src/commands/bridge-transcripts.js'
+import { looksLikeQuestionDialog } from '../src/core/idle.js'
 import * as S from './fixtures/question-screens.js'
 
 describe('parseClaudeQuestionScreen (real captures)', () => {
@@ -81,6 +83,14 @@ describe('parseClaudeQuestionScreen (real captures)', () => {
     expect(parseClaudeQuestionScreen(S.claudeQ2With({}))!.fingerprint).not.toBe(parseClaudeQuestionScreen(S.claudeQ2With({ basil: true }))!.fingerprint)
   })
 
+  it('finding 6: a TodoWrite list above another picker is not a question dialog', () => {
+    expect(looksLikeQuestionDialog('claude', S.CLAUDE_TODOS_ABOVE_PICKER)).toBe(false)
+    expect(parseClaudeQuestionScreen(S.CLAUDE_TODOS_ABOVE_PICKER)).toBeNull()
+    // and a todo list above a REAL question doesn't confuse the tab bar
+    const both = S.CLAUDE_TODOS_ABOVE_PICKER.split('\n').slice(0, 5).join('\n') + '\n' + S.CLAUDE_TWO_FRESH
+    expect(parseClaudeQuestionScreen(both)).toMatchObject({ step: 'question', question: 'Pick a color?', tabs: [{ header: 'Color' }, { header: 'Toppings' }] })
+  })
+
   it('returns null for non-dialog screens and codex dialogs', () => {
     expect(parseClaudeQuestionScreen(S.CLAUDE_TWO_DONE)).toBeNull()
     expect(parseClaudeQuestionScreen(S.CODEX_THREE_FRESH)).toBeNull()
@@ -109,7 +119,7 @@ const fastClock = () => {
   let t = 0
   return { now: () => t, sleep: async (ms: number) => void (t += ms) }
 }
-const idOf = (screen: string) => SCREEN_CALL_PREFIX + parseClaudeQuestionScreen(screen)!.fingerprint
+const idOf = (screen: string) => screenCallId('p', 'n0nce', parseClaudeQuestionScreen(screen)!.fingerprint)
 
 describe('executeScreenAnswer', () => {
   it('lone single-select question: one digit, dialog closes', async () => {
@@ -182,5 +192,44 @@ describe('executeScreenAnswer', () => {
     expect(validateScreenAnswer(q, { submit: true })).toMatch(/not the review/)
     const r = parseClaudeQuestionScreen(S.claudeTwoReview('Cheese'))!
     expect(validateScreenAnswer(r, { selected: [0] })).toMatch(/review/)
+  })
+})
+
+describe('finding 3: screen card ids are per pane and per occurrence', () => {
+  it('id = screen:<paneId>:<nonce>:<fp>, round-trips', () => {
+    expect(parseScreenCallId(screenCallId('P-1', 'abc', 'f00'))).toEqual({ paneId: 'P-1', nonce: 'abc', fingerprint: 'f00' })
+    expect(parseScreenCallId('screen:f00')).toBeNull()
+    expect(parseScreenCallId('toolu_123')).toBeNull()
+  })
+
+  it('the bridge compares only the step fingerprint, and only on the card\'s own pane', async () => {
+    const fp = parseClaudeQuestionScreen(S.CLAUDE_SINGLE_FRESH)!.fingerprint
+    const other = fakePane(S.CLAUDE_SINGLE_FRESH, (s) => s)
+    expect((await executeScreenAnswer(other.backend, 'p', screenCallId('OTHER-PANE', 'x', fp), { selected: [0] }, fastClock())).status).toBe('stale')
+    expect(other.sent).toEqual([])
+    const mine = fakePane(S.CLAUDE_SINGLE_FRESH, (s, k) => (k === '1' ? S.CLAUDE_TWO_DONE : s))
+    expect((await executeScreenAnswer(mine.backend, 'p', screenCallId('p', 'any-nonce', fp), { selected: [0] }, fastClock())).status).toBe('done')
+  })
+
+  function feederWithLinkedClaude(): TranscriptFeeder {
+    const f = new TranscriptFeeder(async () => new Response('{}'))
+    const info = { agent: 'claude' as const, sessionId: 'S1', path: '/x', lastActivity: 0, sizeBytes: 0 }
+    ;(f as any).links = new Map([['S1', 'P1']])
+    ;(f as any).tailers = new Map([['S1', { info, tailer: null }]])
+    return f
+  }
+
+  it('the same dialog twice (or after a bridge restart) gets a new id and new event keys', () => {
+    const q = parseClaudeQuestionScreen(S.CLAUDE_SINGLE_FRESH)!
+    const a = feederWithLinkedClaude()
+    const first = a.screenQuestionEvents('P1', q)
+    a.screenQuestionEvents('P1', null) // answered/closed
+    const second = a.screenQuestionEvents('P1', q) // the identical question again
+    const restarted = feederWithLinkedClaude().screenQuestionEvents('P1', q) // fresh process, same screen
+    const ids = [first, second, restarted].map((p) => p.find((e) => e.event.kind === 'question')!.event.question!.callId)
+    expect(new Set(ids).size).toBe(3)
+    const seqs = [first, second, restarted].map((p) => p.find((e) => e.event.kind === 'question')!.event.seq)
+    expect(new Set(seqs).size).toBe(3)
+    for (const id of ids) expect(parseScreenCallId(id)).toMatchObject({ paneId: 'P1', fingerprint: q.fingerprint })
   })
 })

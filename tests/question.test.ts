@@ -342,6 +342,51 @@ describe('planAnswerSteps + runAnswerSteps', () => {
     expect(pane.sent).toEqual(['2', '1', '2'])
   })
 
+  it('finding 4: each guard checks a screen read AFTER the settle pause, right before its key', async () => {
+    let screen = S.CODEX_THREE_FRESH
+    const sent: string[] = []
+    const backend = {
+      readScreen: async () => screen,
+      sendText: async (_id: string, k: string) => {
+        sent.push(k)
+        if (k === '2' && screen === S.CODEX_THREE_FRESH) screen = S.CODEX_THREE_Q2
+      },
+    }
+    let t = 0
+    const clock = {
+      now: () => t,
+      sleep: async (ms: number) => {
+        t += ms
+        // during the settle pause after step 1, someone answers Q2 on the Mac
+        if (ms === 900 && screen === S.CODEX_THREE_Q2) screen = S.CODEX_THREE_Q3
+      },
+    }
+    const steps = planAnswerSteps('codex', codexItems, [{ selected: [1] }, { selected: [0] }, { selected: [1] }])
+    const r = await runAnswerSteps(backend, 'p', steps, clock, { settleMs: 900 })
+    expect(r.status).toBe('failed')
+    expect(sent).toEqual(['2']) // never typed Q2's key onto Q3
+  })
+
+  it('finding 2: Codex note is typed only once the notes field is really open', async () => {
+    // happy path: Up focuses None of the above, Tab opens notes, text lands in notes, Enter commits
+    const ok = fakePane(S.CODEX_THREE_Q2, (s, k) => {
+      if (k === '\u001b[A' && s === S.CODEX_THREE_Q2) return S.CODEX_THREE_Q2_OTHER_FOCUSED
+      if (k === '\t' && s === S.CODEX_THREE_Q2_OTHER_FOCUSED) return S.codexQ2NotesOpen()
+      if (k === 'Rome' && s === S.codexQ2NotesOpen()) return S.codexQ2NotesOpen('Rome')
+      if (k === '\r') return S.CODEX_THREE_Q3
+      return s
+    })
+    const steps = planAnswerSteps('codex', codexItems, [{ selected: [0] }, { selected: [], other: 'Rome' }, { selected: [0] }]).slice(1, 5)
+    expect(await runAnswerSteps(ok.backend, 'p', steps, fastClock())).toEqual({ status: 'done', outcome: 'answered' })
+    expect(ok.sent).toEqual(['\u001b[A', '\t', 'Rome', '\r'])
+
+    // a dropped Tab: the option list is still focused, so typing would pick/submit options — must stop before typing
+    const dropped = fakePane(S.CODEX_THREE_Q2, (s, k) => (k === '\u001b[A' && s === S.CODEX_THREE_Q2 ? S.CODEX_THREE_Q2_OTHER_FOCUSED : s))
+    const r = await runAnswerSteps(dropped.backend, 'p', steps, fastClock())
+    expect(r.status).toBe('failed')
+    expect(dropped.sent).toEqual(['\u001b[A', '\t'])
+  })
+
   it('Codex free text: Up to "None of the above", Tab, type, Enter', () => {
     const steps = planAnswerSteps('codex', codexItems, [{ selected: [0] }, { selected: [], other: 'Rome' }, { selected: [0] }])
     expect(steps.flatMap((s) => s.keys)).toEqual(['1', '\u001b[A', '\t', 'Rome', '\r', '1'])

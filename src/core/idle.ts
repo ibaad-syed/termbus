@@ -45,6 +45,22 @@ const QUESTION_MARKERS: Record<AgentKind, { footer: RegExp; body: RegExp }> = {
   codex: { footer: /enter to submit (answer|all)/, body: /Question \d+\/\d+/ },
 }
 
+/**
+ * Index of the AskUserQuestion tab bar (`←  ☐ Color  ☐ Toppings  ✔ Submit  →`,
+ * or ` ☐ Fruit` for a lone question) in `lines`, or -1. TodoWrite renders the
+ * same ☐/☒ boxes, so a candidate must sit at the left edge (todo items hang
+ * under `⎿`, indented), and either carry `✔ Submit` or sit directly under the
+ * dialog's top rule — every captured dialog has the rule right above its bar.
+ */
+export function findClaudeTabBar(lines: string[]): number {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i]
+    if (!/^\s?(←\s+)?[☐☒]\s/.test(l)) continue
+    if (/✔\s*Submit/.test(l) || (i > 0 && /^\s*─{8,}\s*$/.test(lines[i - 1]))) return i
+  }
+  return -1
+}
+
 export function looksLikeQuestionDialog(kind: AgentKind, screen: string): boolean {
   const lines = screen.split('\n')
   const tail = lines.slice(-QUESTION_TAIL_LINES).join('\n')
@@ -52,14 +68,15 @@ export function looksLikeQuestionDialog(kind: AgentKind, screen: string): boolea
   // (joined with spaces, whitespace collapsed: in a narrow pane the footer wraps)
   const lastLines = lines.filter((l) => l.trim()).slice(-4).join(' ').replace(/\s+/g, ' ')
   const m = QUESTION_MARKERS[kind]
-  if (m.footer.test(lastLines) && m.body.test(tail)) return true
+  const body = kind === 'claude' ? findClaudeTabBar(lines.slice(-QUESTION_TAIL_LINES)) >= 0 : m.body.test(tail)
+  if (m.footer.test(lastLines) && body) return true
   // Claude's review tab has no key-hint footer (seen live): it ends with the
   // "1. Submit answers / 2. Cancel" choice under "Ready to submit your answers?"
   return (
     kind === 'claude' &&
     /Ready to submit your answers\? .*1\. Submit answers .*2\. Cancel\s*$/.test(lastLines) &&
     /Review your answers/.test(tail) &&
-    /[☐☒]/.test(tail)
+    findClaudeTabBar(lines.slice(-QUESTION_TAIL_LINES)) >= 0
   )
 }
 

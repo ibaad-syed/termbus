@@ -210,3 +210,47 @@ export const CLAUDE_NARROW_FRESH = [
   'Enter to select · Tab/Arrow keys to  ',
   'navigate · Esc to cancel',
 ].join('\n')
+
+/** Q2 with focus moved to "None of the above" (Up wraps to the last row). */
+export const CODEX_THREE_Q2_OTHER_FOCUSED = CODEX_THREE_Q2.replace('  › 1. Paris', '    1. Paris').replace(
+  '    3. None of the above',
+  '  › 3. None of the above',
+)
+
+/** Notes field open — layout per codex-rs request_user_input snapshot
+ *  `options_notes_visible`: an "› Add notes" input and the footer switches to
+ *  "tab or esc to clear notes" (only shown while notes are visible). */
+export function codexQ2NotesOpen(typed = ''): string {
+  return [
+    ...CODEX_PROMPT_ECHO,
+    '  Question 2/3 (2 unanswered) ',
+    '  Which city? ',
+    '  ',
+    '    1. Paris              Choose Paris. ',
+    '    2. Tokyo              Choose Tokyo. ',
+    '  › 3. None of the above  Optionally, add details in notes (tab) ',
+    '  ',
+    `  › ${typed || 'Add notes'} `,
+    '  ',
+    '  tab or esc to clear notes | enter to submit answer ',
+  ].join('\n')
+}
+
+/** A TodoWrite list (☐/☒ lines under ⎿) above an ordinary Claude picker that
+ *  happens to use the same "Enter to select · ↑/↓ to navigate" footer —
+ *  must NOT read as an AskUserQuestion dialog. */
+export const CLAUDE_TODOS_ABOVE_PICKER = [
+  '⏺ Update Todos ',
+  '  ⎿  ☒ Read the bridge code ',
+  '     ☐ Add the parser ',
+  '     ☐ Write tests ',
+  ' ',
+  RULE,
+  ' Select model ',
+  ' ',
+  '❯ 1. Default (recommended) ',
+  '  2. Opus ',
+  '  3. Haiku ',
+  ' ',
+  'Enter to select · ↑/↓ to navigate · Esc to cancel',
+].join('\n')

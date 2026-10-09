@@ -56,24 +56,23 @@ on run argv
 end run
 `
 
-const SEND_SCRIPT = `
+// ONE write per run, as the script's last action, to the session resolved by
+// id and re-checked by id immediately before writing (a `repeat` reference is
+// positional — if a sibling pane closed mid-walk it could point elsewhere).
+// argv: id, payload, newline ("1" = write text with newline, i.e. Enter).
+const WRITE_SCRIPT = `
 on run argv
   set target to item 1 of argv
   set payload to item 2 of argv
-  set doSubmit to item 3 of argv
+  set withNewline to item 3 of argv
   tell application "iTerm2"
     repeat with w in windows
       repeat with t in tabs of w
         repeat with s in sessions of t
           if (id of s) is target then
-            if doSubmit is "1" then
-              -- Two separate writes: agent TUIs (claude/codex) treat a chunk that
-              -- arrives with its trailing CR as a paste, so the CR becomes a line
-              -- break in the composer instead of Enter. A standalone CR after a
-              -- short delay registers as a real keypress.
-              tell s to write text payload newline NO
-              delay 0.2
-              tell s to write text ""
+            if (id of s) is not target then error "session moved: " & target
+            if withNewline is "1" then
+              tell s to write text payload
             else
               tell s to write text payload newline NO
             end if
@@ -277,13 +276,18 @@ export function parseGeometryOutput(raw: string): Map<string, PaneGeometry> {
 /**
  * iTerm raises -1719 "Invalid index" when a window/tab/session disappears
  * while a script is walking `every window` (another app opening or closing
- * panes at the same moment). The list/read/send scripts only act once they
- * reach the target, so an error mid-walk means nothing happened yet — retry.
+ * panes at the same moment). Only scripts whose sole side effect is their
+ * final action may be retried: LIST/READ have none, and WRITE_SCRIPT performs
+ * exactly one write as its last step, so a -1719 means that write didn't
+ * happen. A multi-write sequence (text, then Enter) must never be retried as
+ * a whole — sendText retries each single write on its own.
  */
-async function osascriptRetrying(script: string, args: string[], attempts = 3): Promise<string> {
+type OsaRunner = (script: string, args: string[]) => Promise<string>
+
+async function osascriptRetrying(script: string, args: string[], attempts = 3, run: OsaRunner = osascript): Promise<string> {
   for (let i = 1; ; i++) {
     try {
-      return await osascript(script, args)
+      return await run(script, args)
     } catch (err) {
       if (i >= attempts || !(err instanceof Error) || !err.message.includes('(-1719)')) throw err
       await new Promise((r) => setTimeout(r, 150 * i))
@@ -351,7 +355,11 @@ export function parseListOutput(raw: string, selfSessionId: string | null): Pane
 
 export class AppleScriptBackend implements Backend {
   readonly name = 'applescript'
-  constructor(private readonly selfSessionId: string | null) {}
+  constructor(
+    private readonly selfSessionId: string | null,
+    /** injectable for tests; defaults to the real osascript */
+    private readonly run: OsaRunner = osascript,
+  ) {}
 
   async listPanes(): Promise<Pane[]> {
     const raw = await osascriptRetrying(LIST_SCRIPT, [])
@@ -368,7 +376,16 @@ export class AppleScriptBackend implements Backend {
   }
 
   async sendText(paneId: string, text: string, submit: boolean): Promise<void> {
-    await osascriptRetrying(SEND_SCRIPT, [paneId, text, submit ? '1' : '0'])
+    // Two separate writes: agent TUIs (claude/codex) treat a chunk that
+    // arrives with its trailing CR as a paste, so the CR becomes a line break
+    // in the composer instead of Enter. A standalone CR after a short delay
+    // registers as a real keypress. Each write is its own single-write script,
+    // retried on its own — the text is never written twice.
+    await osascriptRetrying(WRITE_SCRIPT, [paneId, text, '0'], 3, this.run)
+    if (submit) {
+      await new Promise((r) => setTimeout(r, 200))
+      await osascriptRetrying(WRITE_SCRIPT, [paneId, '', '1'], 3, this.run)
+    }
   }
 
   async setPaneName(paneId: string, name: string): Promise<void> {
