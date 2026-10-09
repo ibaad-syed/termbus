@@ -2,8 +2,10 @@ import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
+import { agentDef, agentForCommand, isAgentKind } from '../core/agents.js'
+import { applyMarkToOccupant, loadMarks } from '../core/marks.js'
 import { agentProcessForTty, occupantForTty } from '../core/occupant.js'
-import type { Backend } from '../core/types.js'
+import type { AgentKind, Backend } from '../core/types.js'
 import { probeAgentIdentity } from './identity.js'
 import type { SavedAgent, SavedPane } from './types.js'
 
@@ -72,11 +74,32 @@ export async function captureState(backend: Backend): Promise<{ agents: SavedAge
   const geometry = backend.paneGeometry ? await backend.paneGeometry().catch(() => null) : null
   const out: SavedAgent[] = []
   const layout: SavedPane[] = []
+  const marks = loadMarks()
   for (const p of panes) {
     const proc = await agentProcessForTty(p.tty)
     const g = geometry?.get(p.id)
+    const occ = applyMarkToOccupant(await occupantForTty(p.tty), marks[p.id])
+    // Agents restore can't resume — screen-only types from agents.json, and
+    // manual marks (whose conversation can't be told from the process) — are
+    // remembered without a session; restore lists them as skipped.
+    if (isAgentKind(occ.kind) && (!agentDef(occ.kind)?.resume || (occ.marked && occ.kind !== proc?.kind))) {
+      const cwd = await shellCwdForTty(p.tty)
+      const geo = { cols: g?.cols ?? 0, rows: g?.rows ?? 0, windowPx: g?.windowPx ?? null, profile: g?.profile ?? null }
+      layout.push({ windowIndex: p.windowIndex, tabIndex: p.tabIndex, paneIndex: p.paneIndex, ...geo, name: p.title, kind: occ.kind, sessionId: null, cwd })
+      out.push({
+        paneId: p.id,
+        windowIndex: p.windowIndex,
+        tabIndex: p.tabIndex,
+        paneIndex: p.paneIndex,
+        title: p.title,
+        kind: occ.kind,
+        sessionId: null,
+        cwd,
+        command: occ.command ?? '',
+      })
+      continue
+    }
     if (!proc) {
-      const occ = await occupantForTty(p.tty)
       layout.push({
         windowIndex: p.windowIndex,
         tabIndex: p.tabIndex,
@@ -121,14 +144,15 @@ export async function captureState(backend: Backend): Promise<{ agents: SavedAge
   return { agents: out, layout }
 }
 
-/** `ps -axo pid=,tty=,command=` → interactive claude/codex processes (on a tty). */
-export function agentProcessesFromPs(psOutput: string): Array<{ pid: number; kind: 'claude' | 'codex' }> {
-  const out: Array<{ pid: number; kind: 'claude' | 'codex' }> = []
+/** `ps -axo pid=,tty=,command=` → interactive agent processes (on a tty) of
+ *  every agent type restore can resume; helpers like `devin acp` excluded. */
+export function agentProcessesFromPs(psOutput: string): Array<{ pid: number; kind: AgentKind }> {
+  const out: Array<{ pid: number; kind: AgentKind }> = []
   for (const line of psOutput.split('\n')) {
-    const m = line.trim().match(/^(\d+)\s+(\S+)\s+(\S+)/)
+    const m = line.trim().match(/^(\d+)\s+(\S+)\s+(.*)$/)
     if (!m || m[2] === '??' || m[2] === '-') continue
-    const base = m[3].split('/').pop()
-    if (base === 'claude' || base === 'codex') out.push({ pid: Number(m[1]), kind: base })
+    const def = agentForCommand(m[3])
+    if (def?.resume) out.push({ pid: Number(m[1]), kind: def.id })
   }
   return out
 }
@@ -136,7 +160,7 @@ export function agentProcessesFromPs(psOutput: string): Array<{ pid: number; kin
 export interface LiveAgents {
   ids: Set<string>
   /** running agents whose conversation could not be determined */
-  uncertain: Array<{ kind: 'claude' | 'codex'; cwd: string | null }>
+  uncertain: Array<{ kind: AgentKind; cwd: string | null }>
 }
 
 /**

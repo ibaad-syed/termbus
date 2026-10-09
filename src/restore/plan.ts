@@ -1,3 +1,4 @@
+import { agentDef } from '../core/agents.js'
 import { inferSplitTree, pruneTree, type SplitTree } from './layout.js'
 import type { SavedAgent, SavedPane } from './types.js'
 
@@ -23,7 +24,8 @@ export function planRestore(
   const seen = new Set<string>()
   const keep: SavedAgent[] = []
   for (const a of gen.agents) {
-    if (!a.sessionId) skipped.push({ agent: a, reason: 'session id unknown' })
+    if (!agentDef(a.kind)?.resume) skipped.push({ agent: a, reason: 'no resume support' })
+    else if (!a.sessionId) skipped.push({ agent: a, reason: 'session id unknown' })
     else if (!a.cwd) skipped.push({ agent: a, reason: 'working directory unknown' })
     else if (liveSessionIds.has(a.sessionId)) skipped.push({ agent: a, reason: 'already running' })
     else if (maybeLive(a)) skipped.push({ agent: a, reason: 'possibly running (an agent there could not be identified)' })
@@ -81,7 +83,8 @@ export function tabLayout(
     if (agent) {
       leaves.set(i, { agent, cwd: agent.cwd!, profile: p.profile })
       placed.add(agent)
-    } else if ((p.kind === 'shell' || p.kind === 'other') && p.cwd) {
+    } else if ((p.kind === 'shell' || p.kind === 'other' || !agentDef(p.kind)?.resume) && p.cwd) {
+      // agents restore can't resume (agents.json types) reopen as a shell in their directory
       leaves.set(i, { agent: null, cwd: p.cwd, profile: p.profile })
     }
   })

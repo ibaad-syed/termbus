@@ -5,7 +5,7 @@ import { detectBackend } from '../backends/detect.js'
 import { defaultClock } from '../core/ask.js'
 import { ensureDeliverable, isAgentKind, paneState } from '../core/delivery.js'
 import { TermbusError } from '../core/errors.js'
-import { occupantForTty } from '../core/occupant.js'
+import { occupantForPane } from '../core/occupant.js'
 import { resolveTarget } from '../core/resolve.js'
 import { applySnapshots, diffStates, type WatchSnapshot } from '../core/watch.js'
 import type { Backend, Pane } from '../core/types.js'
@@ -18,7 +18,7 @@ const USAGE =
 
 async function snapshot(backend: Backend, pane: Pane): Promise<WatchSnapshot | null> {
   try {
-    const occ = await occupantForTty(pane.tty)
+    const occ = await occupantForPane(pane)
     const screen = isAgentKind(occ.kind) ? await backend.readScreen(pane.id) : ''
     return { id: pane.id, label: pane.label, title: pane.title, state: paneState(occ, screen) }
   } catch {
@@ -33,7 +33,7 @@ async function notify(text: string): Promise<void> {
 
 async function push(backend: Backend, panes: Pane[], target: string, message: string): Promise<string> {
   const pane = resolveTarget(panes, target)
-  const occ = await occupantForTty(pane.tty)
+  const occ = await occupantForPane(pane)
   const screen = await backend.readScreen(pane.id)
   if (paneState(occ, screen) === 'awaiting-input') {
     return `push skipped: supervisor ${pane.label} is itself awaiting input`
@@ -85,7 +85,7 @@ export async function cmdWatch(argv: string[]): Promise<void> {
       })
     } else {
       const withOcc = await Promise.all(
-        panes.filter((p) => !p.isSelf).map(async (p) => ({ p, occ: await occupantForTty(p.tty) })),
+        panes.filter((p) => !p.isSelf).map(async (p) => ({ p, occ: await occupantForPane(p) })),
       )
       watched = withOcc.filter(({ occ }) => isAgentKind(occ.kind)).map(({ p }) => p)
     }

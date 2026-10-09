@@ -1,107 +1,43 @@
+import { agentDef } from '../core/agents.js'
+import { TermbusError } from '../core/errors.js'
 import type { AgentKind } from '../core/types.js'
 
 /**
- * Flags worth carrying into the resumed process: they set the agent's posture
- * (permissions, model, sandbox, extra dirs). Everything else is dropped and
- * reported — notably positional prompts, which must never be re-sent. ps
- * joins argv with spaces, so values containing spaces cannot be recovered;
- * the allowlist keeps the reconstruction honest.
+ * Rebuild the command that resumes an agent's conversation. Per-agent flag
+ * tables live in the agent registry (src/core/agents.ts, `resume`):
+ *  - keep: flags worth carrying into the resumed process — they set the
+ *    agent's posture (permissions, model, sandbox, extra dirs);
+ *  - strip: flags that select WHICH conversation, replaced by the saved id.
+ * Everything else is dropped and reported — notably positional prompts, which
+ * must never be re-sent. ps joins argv with spaces, so values containing
+ * spaces cannot be recovered; the allowlist keeps the reconstruction honest.
  */
-const KEEP: Record<AgentKind, { bool: Set<string>; value: Set<string> }> = {
-  claude: {
-    bool: new Set([
-      '--dangerously-skip-permissions',
-      '--allow-dangerously-skip-permissions',
-      '--chrome',
-      '--no-chrome',
-      '--ide',
-      '--verbose',
-      '--brief',
-      '--strict-mcp-config',
-      '--disable-slash-commands',
-    ]),
-    value: new Set([
-      '--model',
-      '--permission-mode',
-      '--add-dir',
-      '--effort',
-      '--fallback-model',
-      '--agent',
-      '--settings',
-      '--mcp-config',
-      '--plugin-dir',
-      '--setting-sources',
-      '--allowedTools',
-      '--allowed-tools',
-      '--disallowedTools',
-      '--disallowed-tools',
-    ]),
-  },
-  codex: {
-    bool: new Set([
-      '--yolo',
-      '--dangerously-bypass-approvals-and-sandbox',
-      '--full-auto',
-      '--search',
-      '--oss',
-      '--no-alt-screen',
-      '--approve-for-me',
-    ]),
-    value: new Set([
-      '-m',
-      '--model',
-      '-p',
-      '--profile',
-      '-c',
-      '--config',
-      '-s',
-      '--sandbox',
-      '-a',
-      '--ask-for-approval',
-      '--add-dir',
-      '--enable',
-      '--disable',
-      '--local-provider',
-    ]),
-  },
-}
-
-/** Flags that select WHICH conversation; replaced by the saved id. */
-const STRIP: Record<AgentKind, { bool: Set<string>; value: Set<string>; optional: Set<string> }> = {
-  claude: {
-    bool: new Set(['-c', '--continue', '--fork-session']),
-    value: new Set(['--session-id']),
-    optional: new Set(['-r', '--resume']),
-  },
-  codex: {
-    bool: new Set(['--last', '--all']),
-    value: new Set(['-C', '--cd']),
-    optional: new Set(),
-  },
-}
-
-const UUIDISH = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
 export function buildResumeArgv(
   kind: AgentKind,
   command: string,
   sessionId: string,
 ): { argv: string[]; dropped: string[] } {
+  const resume = agentDef(kind)?.resume
+  if (!resume) throw new TermbusError(`${kind} has no resume support`)
   const [bin, ...rest] = command.trim().split(/\s+/)
-  const keep = KEEP[kind]
-  const strip = STRIP[kind]
+  const { keep, strip } = resume
   const kept: string[] = []
   const dropped: string[] = []
   let sawResume = false
   for (let i = 0; i < rest.length; i++) {
     const tok = rest[i]
-    if (kind === 'codex' && tok === 'resume' && !sawResume) {
+    if (resume.endOfFlags !== undefined && tok === resume.endOfFlags) {
+      // everything after it is prompt text
+      dropped.push(...rest.slice(i))
+      break
+    }
+    if (resume.subcommand !== undefined && tok === resume.subcommand && !sawResume) {
       sawResume = true
       const next = rest[i + 1]
       if (next && !next.startsWith('-')) {
         // only a real session id proves this was the subcommand and not prompt
         // text ("resume x --yolo"); anything else makes the line ambiguous
-        if (UUIDISH.test(next)) i++
+        if (resume.sessionId.test(next)) i++
         else dropped.push(tok)
       }
       continue
@@ -120,7 +56,7 @@ export function buildResumeArgv(
     if (strip.optional.has(name)) {
       const next = rest[i + 1]
       if (!inlineValue && next && !next.startsWith('-')) {
-        if (UUIDISH.test(next)) i++
+        if (resume.sessionId.test(next)) i++
         else dropped.push(tok) // "--resume foo": a picker search term or prompt text — ambiguous
       }
       continue
@@ -136,7 +72,7 @@ export function buildResumeArgv(
     }
     dropped.push(tok)
   }
-  const head = kind === 'claude' ? [bin, '--resume', sessionId] : [bin, 'resume', sessionId]
+  const head = resume.head(bin, sessionId)
   // Anything unrecognized means argv boundaries are unknowable (ps flattens
   // quoting): `codex "explain --yolo"` must not come back with --yolo. Only a
   // command line that parses entirely as known flags carries any of them.

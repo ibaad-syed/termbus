@@ -4,7 +4,7 @@ import { defaultClock } from '../core/ask.js'
 import { ensureDeliverable, isAgentKind, resolveMode } from '../core/delivery.js'
 import { buildEnvelope, detectSenderKind, envelopeId } from '../core/envelope.js'
 import { TermbusError } from '../core/errors.js'
-import { occupantForTty } from '../core/occupant.js'
+import { occupantForPane } from '../core/occupant.js'
 import { decodeRawEscapes } from '../core/raw.js'
 import { isGroupSpec } from '../core/org.js'
 import { resolveTarget } from '../core/resolve.js'
@@ -51,9 +51,9 @@ export async function cmdSend(argv: string[]): Promise<void> {
   const pane = resolveTarget(panes, target)
   if (pane.isSelf) throw new TermbusError('refusing to send to self (would type into this pane)')
 
-  const occ = await occupantForTty(pane.tty)
+  const occ = await occupantForPane(pane)
   const { outcome, waitedMs } = await ensureDeliverable(
-    { backend, clock: defaultClock, probeOccupant: () => occupantForTty(pane.tty) },
+    { backend, clock: defaultClock, probeOccupant: () => occupantForPane(pane) },
     pane,
     occ,
     mode,

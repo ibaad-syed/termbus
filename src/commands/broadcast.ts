@@ -4,7 +4,7 @@ import { defaultClock } from '../core/ask.js'
 import { ensureDeliverable, isAgentKind, paneState, resolveMode, type DeliveryMode } from '../core/delivery.js'
 import { buildEnvelope, detectSenderKind, envelopeId } from '../core/envelope.js'
 import { TermbusError } from '../core/errors.js'
-import { occupantForTty } from '../core/occupant.js'
+import { occupantForPane } from '../core/occupant.js'
 import { loadOrg, resolveGroupTargets } from '../core/org.js'
 import type { Occupant, Pane } from '../core/types.js'
 
@@ -41,7 +41,7 @@ export async function deliverToMany(
   const backend = detectBackend()
   const panes = await backend.listPanes()
   const occ = new Map<string, Occupant>()
-  await Promise.all(panes.map(async (p) => occ.set(p.id, await occupantForTty(p.tty))))
+  await Promise.all(panes.map(async (p) => occ.set(p.id, await occupantForPane(p))))
   const isAgent = (p: Pane) => isAgentKind(occ.get(p.id)?.kind ?? 'unknown')
   const { panes: targets, group, missing } = resolveGroupTargets(panes, loadOrg(), spec, isAgent)
   if (targets.length === 0 && missing.length === 0) throw new TermbusError(`no agents matched "${spec}"`)
@@ -56,7 +56,7 @@ export async function deliverToMany(
     }
     try {
       const { outcome } = await ensureDeliverable(
-        { backend, clock: defaultClock, probeOccupant: () => occupantForTty(pane.tty) },
+        { backend, clock: defaultClock, probeOccupant: () => occupantForPane(pane) },
         pane,
         occ.get(pane.id)!,
         mode,
@@ -64,7 +64,7 @@ export async function deliverToMany(
       )
       // re-check right before typing: waiting for idle can take minutes, and
       // an agent that exited leaves a shell that would run the text
-      if (!isAgentKind((await occupantForTty(pane.tty)).kind)) {
+      if (!isAgentKind((await occupantForPane(pane)).kind)) {
         reports.push({ pane, result: 'skipped', reason: 'the agent exited' })
         continue
       }
@@ -73,7 +73,7 @@ export async function deliverToMany(
       await backend.sendText(pane.id, payload, false)
       // Enter separately, and only if it's still an agent with no dialog up
       await defaultClock.sleep(200)
-      const now = await occupantForTty(pane.tty)
+      const now = await occupantForPane(pane)
       if (!isAgentKind(now.kind) || paneState(now, await backend.readScreen(pane.id)) === 'awaiting-input') {
         reports.push({ pane, result: 'skipped', reason: 'a prompt appeared — the text is in its input box, not submitted' })
         continue

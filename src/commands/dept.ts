@@ -1,7 +1,7 @@
 import { parseArgs } from 'node:util'
 import { detectBackend } from '../backends/detect.js'
 import { TermbusError } from '../core/errors.js'
-import { occupantForTty } from '../core/occupant.js'
+import { occupantForPane } from '../core/occupant.js'
 import { applyOrgOp, loadOrg, updateOrg, type OrgOp } from '../core/org.js'
 import { resolveTarget } from '../core/resolve.js'
 
@@ -60,7 +60,7 @@ async function list(json: boolean): Promise<void> {
         d.members.map(async (id) => {
           const p = panes.find((x) => x.id === id)
           return p
-            ? { paneId: id, open: true, label: p.label, title: p.title, occupant: (await occupantForTty(p.tty)).kind }
+            ? { paneId: id, open: true, label: p.label, title: p.title, occupant: (await occupantForPane(p)).kind }
             : { paneId: id, open: false }
         }),
       ),

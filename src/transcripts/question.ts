@@ -1,8 +1,8 @@
 import type { TranscriptAgent, TranscriptQuestionItem } from './types.js'
 import { MAX_QUESTION_ITEMS, MAX_QUESTION_OPTIONS, MAX_QUESTION_TEXT_CHARS, truncate } from './types.js'
 
-/** Tool names that put an interactive question dialog on screen. */
-export const QUESTION_TOOLS: Record<TranscriptAgent, string> = {
+/** Tool names that put an interactive question dialog on screen (Devin: none known). */
+export const QUESTION_TOOLS: Record<'claude' | 'codex', string> = {
   claude: 'AskUserQuestion',
   codex: 'request_user_input',
 }

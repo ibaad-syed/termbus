@@ -17,7 +17,7 @@ No hooks. No config. It observes the sessions you already have open — if you c
 ## What you can do
 
 ```sh
-termbus list                              # every pane: claude/codex/shell, idle/busy/input!
+termbus list                              # every pane: claude/codex/devin/shell, idle/busy/input!
 termbus ask "worker" "run the tests and summarize failures" --timeout 300
 termbus send w1.t2.p1 "also add edge-case tests" --queue    # busy agent? lands in its input queue
 termbus check "dev server"                # read any pane's screen without touching it
@@ -35,7 +35,8 @@ Or don't type any of this — after `install-skill`, just tell your Claude:
 - **Knows when an agent is stuck.** Permission prompts (`Do you want to proceed?`) are detected as a third state — `input!` — not mistaken for idle. `ask` returns early with the dialog and the exact keys to answer it, or auto-approves with `--on-permission approve` (opt-in, capped).
 - **Never interrupts by default.** Busy agents refuse messages unless you choose: `--queue` (their native input queue — they see it mid-turn), `--wait` (deliver when idle), or `--force`.
 - **Agents know who's talking.** Messages carry a sender envelope (`[termbus-msg v=1 from=w1.t1.p2 kind=claude …]`) so a receiving agent can reply to the right pane — and never mistakes a peer for its human.
-- **Works across models.** Claude Code, Codex, plain shells, dev servers — one interface. New agent TUIs are a few regexes to add.
+- **Works across models.** Claude Code, Codex, Devin CLI, plain shells, dev servers — one interface. Any other agent TUI is a few regexes in `~/.termbus/agents.json` (below).
+- **Devin CLI is supported** — detection, messaging, HQ transcripts, restore (`devin -r <session>`). Its state detection is preliminary: only the idle screen is confirmed so far, so a Devin screen termbus doesn't recognize reads as busy and is never typed into without `--wait`/`--force`.
 
 ## Departments and broadcast
 
@@ -52,6 +53,30 @@ termbus send a,b,c "same message to three agents"
 
 Busy agents get broadcasts in their input queue (`--wait` / `--force` to change that), shell panes are never typed into, and each recipient sees `(to @api)` so it knows the message went to a group. Agents learn all of this from the skill, so they can ask their own department for help. Departments live in `~/.termbus/org.json` on your Mac and survive `termbus restore`.
 
+## More agents: agents.json and marks
+
+Claude Code, Codex and Devin are built in. Declare any other agent TUI in `~/.termbus/agents.json` (or the file named by `TERMBUS_AGENTS_FILE`):
+
+```json
+[
+  { "id": "aider", "label": "Aider", "commands": ["aider"],
+    "busy": ["Waiting for"], "prompt": ["\\(Y\\)es/\\(N\\)o"], "idle": ["^> ?$"], "nativeQueue": false }
+]
+```
+
+- `id`: lowercase, 2–32 chars (`a-z`, digits, `-`), not a built-in; `commands`: process names (no paths); `busy` / `prompt` / `idle`: regex strings (≤ 200 chars) matched against the bottom of the screen (`idle` sees the last non-empty lines, right-trimmed — set it and any screen that's neither busy, a prompt, nor idle reads as busy); `nativeQueue`: the TUI accepts messages mid-turn (default false: busy panes refuse, use `--wait`).
+- These agents get the full CLI (`list`, `send`, `ask`, `broadcast`, `watch`, departments, HQ chat via its screen view). No transcripts, question cards or restore — `restore` lists them as skipped (no resume support) and reopens their pane as a shell.
+- Invalid entries are skipped with a one-line warning; termbus never fails because of this file.
+
+Detection missed a pane (agent started through a wrapper, `ssh`, `npx`…)? Mark it:
+
+```sh
+termbus mark w1.t2.p1 devin      # any built-in or agents.json kind
+termbus unmark w1.t2.p1          # back to automatic detection
+```
+
+Marks live in `~/.termbus/marks.json` (`TERMBUS_MARKS_FILE`), win over process detection while a program runs in the pane (once it exits the pane is a shell again, so text is never typed into a bare prompt), show as `kind*` in `termbus list` (`"marked": true` in `--json`), follow panes through `termbus restore`, and can be set from HQ.
+
 ## Survive a restart
 
 Restart your Mac (or quit iTerm2) and your agents normally vanish — you're left re-opening panes and hunting for `--resume` IDs. termbus remembers them instead:
@@ -61,12 +86,12 @@ termbus restore --dry-run   # preview what comes back
 termbus restore             # reopen it
 ```
 
-- **Every agent resumes its own conversation** — Claude Code and Codex, in the directory it ran in, with its permission flags (`--dangerously-skip-permissions`, `--yolo`, model…) when they can be read unambiguously.
+- **Every agent resumes its own conversation** — Claude Code, Codex and Devin, in the directory it ran in, with its permission flags (`--dangerously-skip-permissions`, `--yolo`, model…) when they can be read unambiguously.
 - **Your layout comes back** — windows, tabs, and each tab's split arrangement (side by side, stacked, nested). Shells and dev-server panes reopen as shells in their directory; their commands are not re-run.
 - **Nothing is duplicated** — agents still running anywhere are skipped, so running `restore` twice is harmless.
 - **It's automatic.** The first time you run termbus, it starts remembering in the background (a small launchd service; turn off with `termbus snapshot --uninstall`). After a restart you get a notification telling you how many agents can come back. `termbus restore --list` shows saved snapshots; `--generation N` restores an older one.
 
-Under the hood: Claude Code's session is read from its per-process session file, Codex's from the session log it holds open; pane sizes reveal each tab's split tree. Nothing is ever typed into a pane — each restored pane launches its own resume command.
+Under the hood: Claude Code's session is read from its per-process session file, Codex's from the session log it holds open, Devin's from the session lock its `devin acp` process holds; pane sizes reveal each tab's split tree. Nothing is ever typed into a pane — each restored pane launches its own resume command.
 
 ## How it works
 
@@ -106,6 +131,8 @@ That installs a launchd service (runs at login, restarts automatically) streamin
 - HQ's *Full auto* setting skips the tap only if the Mac also allows it: `termbus bridge --allow-auto-exec` (undo with `--no-auto-exec` / `--no-exec`).
 
 Commands run in the background (never in a pane), inside your home directory, with timeouts, and with credentials redacted from their output.
+
+Messages you type in HQ reach agents as `from=hq` (you); messages the Conductor writes arrive as `from=conductor`, and the installed skill tells agents it is an AI acting for you — fine for normal work, but not your authorization for destructive or irreversible actions, secrets, publishing, or permission changes.
 
 > HQ is a self-hosted Next.js + Postgres app (Vercel + Neon free tiers). It's in early access — [open an issue](https://github.com/ibaad-syed/termbus/issues) if you'd like access or the deploy guide.
 

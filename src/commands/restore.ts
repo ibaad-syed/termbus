@@ -6,6 +6,7 @@ import { detectBackend } from '../backends/detect.js'
 import { defaultClock } from '../core/ask.js'
 import { TermbusError } from '../core/errors.js'
 import type { Backend } from '../core/types.js'
+import { remapMarks, updateMarks } from '../core/marks.js'
 import { remapMembers, updateOrg } from '../core/org.js'
 import { liveAgents, snapshotFile, terminalInstance } from '../restore/capture.js'
 import { describeTree, planRestore, tabLayout, type LeafSpec } from '../restore/plan.js'
@@ -171,7 +172,7 @@ async function runRestore(backend: Backend, gen: Generation, dryRun: boolean): P
     if (spec.agent) opened.push(spec.agent.sessionId!)
     return { command: /\s/.test(script) ? `"${script}"` : script, profile: spec.profile ?? undefined }
   }
-  // saved pane id → new pane id, so department memberships follow the agents
+  // saved pane id → new pane id, so department memberships and marks follow the agents
   const remap = new Map<string, string>()
   const placed = (spec: LeafSpec, paneId: string) => {
     if (spec.agent) remap.set(spec.agent.paneId, paneId)
@@ -196,7 +197,10 @@ async function runRestore(backend: Backend, gen: Generation, dryRun: boolean): P
     }
   }
   console.log(`reopened ${opened.length} agent pane${opened.length === 1 ? '' : 's'}`)
-  if (remap.size > 0) updateOrg((org) => remapMembers(org, remap))
+  if (remap.size > 0) {
+    updateOrg((org) => remapMembers(org, remap))
+    updateMarks((marks) => remapMarks(marks, remap))
+  }
   // hold the lock until the agents are visibly running, so a second restore
   // started right now cannot mistake them for missing and open them again
   const deadline = Date.now() + 30_000

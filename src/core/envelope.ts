@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { agentForCommand } from './agents.js'
+import type { AgentKind } from './types.js'
 
 const execFileP = promisify(execFile)
 
@@ -11,22 +13,23 @@ const execFileP = promisify(execFile)
  *
  * Design notes (from codex review):
  * - kind is the OBSERVED process ancestry of the termbus invocation, never an
- *   authority claim: claude/codex (an agent ran termbus), shell (a person's
- *   shell), unknown. It is advisory and spoofable by anything that can type
+ *   authority claim: an agent kind from the registry — claude/codex/devin/… —
+ *   (an agent ran termbus), shell (a person's shell), unknown. It is advisory and spoofable by anything that can type
  *   into a pane — real signed identity belongs to the HQ layer.
  * - No title field: titles are unstable, unescapable, and spoof bait.
  * - from is the sender's pane label (resolvable as a reply target); external
- *   when termbus runs outside any iTerm2 pane.
+ *   when termbus runs outside any iTerm2 pane. The bridge uses two reserved
+ *   labels: hq (the user, via the HQ app) and conductor (the user's HQ
+ *   Conductor, an AI coordinator acting for the user — not the user).
  */
 
-export type SenderKind = 'claude' | 'codex' | 'shell' | 'unknown'
+export type SenderKind = AgentKind | 'shell' | 'unknown'
 
 export interface Sender {
   label: string // pane label, or "external"
   kind: SenderKind
 }
 
-const AGENT_NAMES = new Set(['claude', 'codex'])
 const SHELL_NAMES = new Set(['zsh', 'bash', 'fish', 'sh', 'dash', 'tcsh', 'csh', 'ksh', 'nu', 'login'])
 
 export interface PsRow {
@@ -55,7 +58,9 @@ export function classifyAncestry(rows: PsRow[], startPid: number, maxDepth = 25)
     const row = byPid.get(pid)
     if (!row) break
     const base = (row.comm.split(/\s+/)[0]?.split('/').pop() ?? '').replace(/^-/, '')
-    if (AGENT_NAMES.has(base)) return base as SenderKind
+    // helper processes count too: a Devin tool call runs under `devin acp`
+    const agent = agentForCommand(row.comm, { respectExclude: false })
+    if (agent) return agent.id
     if (SHELL_NAMES.has(base)) sawShell = true
     if (row.ppid <= 1 || row.ppid === pid) break
     pid = row.ppid

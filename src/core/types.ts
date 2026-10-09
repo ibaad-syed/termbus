@@ -27,8 +27,11 @@ export interface Backend {
   paneGeometry?(): Promise<Map<string, { cols: number; rows: number; windowPx: { w: number; h: number }; profile: string }> | null>
 }
 
-export type OccupantKind = 'claude' | 'codex' | 'shell' | 'command' | 'unknown'
-export type AgentKind = 'claude' | 'codex'
+/** Agent kinds are registry ids (src/core/agents.ts): the built-ins below,
+ *  plus any declared in ~/.termbus/agents.json. Check with isAgentKind(). */
+export type BuiltinAgentKind = 'claude' | 'codex' | 'devin'
+export type AgentKind = BuiltinAgentKind | (string & {})
+export type OccupantKind = AgentKind | 'shell' | 'command' | 'unknown'
 
 export interface Occupant {
   kind: OccupantKind

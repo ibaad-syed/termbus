@@ -1,3 +1,4 @@
+import { agentDef, isAgentKind as registryHas } from './agents.js'
 import { AwaitingInputError, BusyPaneError, TermbusError, WaitTimeoutError } from './errors.js'
 import { agentScreenState, type AgentScreenState } from './idle.js'
 import type { AgentKind, Backend, Occupant, Pane } from './types.js'
@@ -5,20 +6,18 @@ import type { AgentKind, Backend, Occupant, Pane } from './types.js'
 export type DeliveryMode = 'refuse' | 'queue' | 'wait' | 'force'
 
 /**
- * Per-agent delivery capabilities. Extensible: a new agent TUI is one row
- * here plus its busy markers in idle.ts.
- *
- * nativeQueue: the TUI accepts a submitted message while busy and surfaces it
- * itself (claude and codex both queue input typed mid-turn), so termbus can
- * deliver immediately and report "queued" instead of refusing.
+ * Per-agent delivery capabilities come from the agent registry
+ * (src/core/agents.ts). nativeQueue: the TUI accepts a submitted message while
+ * busy and surfaces it itself (claude and codex both queue input typed
+ * mid-turn), so termbus can deliver immediately and report "queued" instead
+ * of refusing.
  */
-export const AGENT_CAPS: Record<AgentKind, { nativeQueue: boolean }> = {
-  claude: { nativeQueue: true },
-  codex: { nativeQueue: true },
+export function nativeQueue(kind: AgentKind): boolean {
+  return agentDef(kind)?.nativeQueue === true
 }
 
 export function isAgentKind(kind: Occupant['kind']): kind is AgentKind {
-  return kind === 'claude' || kind === 'codex'
+  return registryHas(kind)
 }
 
 /**
@@ -104,7 +103,7 @@ export async function ensureDeliverable(
     case 'refuse':
       throw new BusyPaneError(pane, screen)
     case 'queue': {
-      if (isAgentKind(occ.kind) && AGENT_CAPS[occ.kind].nativeQueue) {
+      if (isAgentKind(occ.kind) && nativeQueue(occ.kind)) {
         return { outcome: 'queued', waitedMs: 0 }
       }
       throw new TermbusError(

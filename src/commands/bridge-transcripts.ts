@@ -1,8 +1,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { discoverSessions, SessionTailer } from '../transcripts/index.js'
-import type { SessionInfo, TailerState, TranscriptEvent, TranscriptQuestionItem } from '../transcripts/index.js'
+import { discoverDevinSessions, DevinSessionSource, discoverSessions, SessionTailer } from '../transcripts/index.js'
+import type { SessionInfo, TailerState, TranscriptAgent, TranscriptEvent, TranscriptQuestionItem } from '../transcripts/index.js'
 import { agentProcessForTty } from '../core/occupant.js'
 import { probeAgentIdentity } from '../restore/identity.js'
 import type { Pane } from '../core/types.js'
@@ -28,7 +28,7 @@ interface PersistedState {
 export interface OpenQuestion {
   callId: string
   sessionId: string
-  agent: 'claude' | 'codex'
+  agent: TranscriptAgent
   items: TranscriptQuestionItem[]
   allowOther: boolean
   ts: string
@@ -102,8 +102,46 @@ export function linkSessionsToPanes(
   return links
 }
 
+/**
+ * Sessions that know their terminal (Devin: the tty of the `devin acp`
+ * process holding the session lock) link to the pane on that tty — exact, by
+ * process, never by cwd. Pure — unit-testable.
+ */
+export function linkSessionsByTty(
+  sessions: Array<Pick<SessionInfo, 'sessionId' | 'tty'>>,
+  panes: Array<{ paneId: string; tty: string }>,
+): Map<string, string> {
+  const norm = (t: string) => t.replace(/^\/dev\//, '')
+  const links = new Map<string, string>()
+  for (const s of sessions) {
+    if (!s.tty) continue
+    const pane = panes.find((p) => norm(p.tty) === norm(s.tty!))
+    if (pane) links.set(s.sessionId, pane.paneId)
+  }
+  return links
+}
+
 export interface FeederApi {
   (path: string, init?: RequestInit): Promise<Response>
+}
+
+/** What the feeder polls: a JSONL tailer (Claude/Codex) or a Devin DB reader. */
+export interface TranscriptPoller {
+  readonly info: SessionInfo
+  poll(): Promise<TranscriptEvent[]>
+  getState(): TailerState
+}
+
+export interface FeederOptions {
+  /** live Devin sessions (tests inject; default reads Devin's lock files) */
+  discoverDevin?: () => Promise<SessionInfo[]>
+  /** build a poller for a session (tests inject) */
+  pollerFor?: (info: SessionInfo, initialState?: TailerState) => TranscriptPoller
+}
+
+function defaultPoller(info: SessionInfo, initialState?: TailerState): TranscriptPoller {
+  const opts = initialState ? { initialState } : {}
+  return info.agent === 'devin' ? new DevinSessionSource(info, opts) : new SessionTailer(info, opts)
 }
 
 /**
@@ -111,7 +149,7 @@ export interface FeederApi {
  * call tick() every interval; pane links refresh on a slower cadence.
  */
 export class TranscriptFeeder {
-  private tailers = new Map<string, { info: SessionInfo; tailer: SessionTailer }>()
+  private tailers = new Map<string, { info: SessionInfo; tailer: TranscriptPoller }>()
   private state = loadState()
   /** pane link last declared to the relay per session */
   private postedLinks = new Map<string, string | null>()
@@ -124,7 +162,10 @@ export class TranscriptFeeder {
   private links = new Map<string, string>()
   private tickCount = 0
 
-  constructor(private readonly api: FeederApi) {}
+  constructor(
+    private readonly api: FeederApi,
+    private readonly opts: FeederOptions = {},
+  ) {}
 
   linkedPane(sessionId: string): string | undefined {
     return this.links.get(sessionId)
@@ -137,19 +178,29 @@ export class TranscriptFeeder {
   async refreshLinks(panes: Pane[], sessions?: SessionInfo[]): Promise<void> {
     const list = sessions ?? this.lastSessions
     if (sessions) this.lastSessions = sessions
+    // Devin sessions know their terminal (the tty of the `devin acp` holding
+    // the session lock): an exact link, no folder matching for them
+    const byTty = linkSessionsByTty(
+      list.filter((s) => s.tty),
+      panes.map((p) => ({ paneId: p.id, tty: p.tty })),
+    )
+    const ttyPanes = new Set(byTty.values())
     const agentPanes: Array<{ paneId: string; kind: string; cwd: string | null; sessionId: string | null }> = []
     for (const p of panes) {
+      if (ttyPanes.has(p.id)) continue
       const proc = await agentProcessForTty(p.tty)
       if (!proc) continue
       // which conversation is this process running? (re-read every refresh:
-      // /clear or a resume switches it)
+      // /clear or a resume switches it) — every registry kind: Claude's
+      // per-pid session file, Codex's open rollout, Devin's session lock
       const id = await probeAgentIdentity(proc.kind, proc.pid)
       agentPanes.push({ paneId: p.id, kind: proc.kind, cwd: id.cwd, sessionId: id.sessionId })
     }
     this.links = linkSessionsToPanes(
-      list.map((s) => ({ sessionId: s.sessionId, agent: s.agent, cwd: s.cwd, lastActivity: s.lastActivity })),
+      list.filter((s) => !s.tty).map((s) => ({ sessionId: s.sessionId, agent: s.agent, cwd: s.cwd, lastActivity: s.lastActivity })),
       agentPanes,
     )
+    for (const [sessionId, paneId] of byTty) this.links.set(sessionId, paneId)
   }
 
   private postedFingerprints = new Set<string>()
@@ -262,15 +313,21 @@ export class TranscriptFeeder {
 
   async tick(panes: Pane[]): Promise<void> {
     this.tickCount++
-    const sessions = (await discoverSessions({ activeWindowMs: 24 * 3600 * 1000 })).slice(0, 8)
+    const files = (await discoverSessions({ activeWindowMs: 24 * 3600 * 1000 })).slice(0, 8)
+    // Devin keeps sessions in a database: only the ones live in a pane right now
+    const devin = await (this.opts.discoverDevin ?? (() => discoverDevinSessions()))().catch(() => [] as SessionInfo[])
+    const sessions = [...files, ...devin]
     this.lastSessions = sessions
 
     for (const info of sessions) {
-      if (!this.tailers.has(info.sessionId)) {
+      const known = this.tailers.get(info.sessionId)
+      // a fresh Devin session gains its cwd once its first message is stored
+      if (known && info.agent === 'devin') known.info = info
+      if (!known) {
         const initialState = this.state.tailers[info.sessionId]
         this.tailers.set(info.sessionId, {
           info,
-          tailer: new SessionTailer(info, initialState ? { initialState } : {}),
+          tailer: (this.opts.pollerFor ?? defaultPoller)(info, initialState),
         })
       }
     }

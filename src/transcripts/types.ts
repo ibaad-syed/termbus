@@ -1,4 +1,4 @@
-export type TranscriptAgent = 'claude' | 'codex'
+export type TranscriptAgent = 'claude' | 'codex' | 'devin'
 
 export type TranscriptEventKind =
   | 'session_start'
@@ -105,6 +105,9 @@ export interface SessionInfo {
   sessionId: string
   path: string
   cwd?: string
+  /** the session's terminal (Devin: the tty of its `devin acp` process) —
+   *  links it to its pane exactly, instead of by cwd */
+  tty?: string
   /** file mtime in ms since epoch */
   lastActivity: number
   sizeBytes: number

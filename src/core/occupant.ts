@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import type { Occupant } from './types.js'
+import { agentForCommand, isAgentKind } from './agents.js'
+import { applyMarkToOccupant, loadMarks } from './marks.js'
+import type { AgentKind, Occupant, Pane } from './types.js'
 
 const execFileP = promisify(execFile)
 
@@ -62,16 +64,15 @@ export function classifyPs(psOutput: string): Occupant {
   if (fg.length === 0) return { kind: 'unknown', command: null }
   const primary = foregroundProcess(psOutput)
   if (!primary) return { kind: 'shell', command: null }
-  const base = commandBase(primary.command)
-  if (base === 'claude') return { kind: 'claude', command: primary.command }
-  if (base === 'codex') return { kind: 'codex', command: primary.command }
+  const agent = agentForCommand(primary.command)
+  if (agent) return { kind: agent.id, command: primary.command }
   return { kind: 'command', command: primary.command }
 }
 
-/** The agent (claude/codex) in front of a pane, with its pid; null otherwise. */
+/** The agent in front of a pane (by process, see the agent registry), with its pid; null otherwise. */
 export async function agentProcessForTty(
   tty: string,
-): Promise<{ kind: 'claude' | 'codex'; pid: number; command: string } | null> {
+): Promise<{ kind: AgentKind; pid: number; command: string } | null> {
   const ttyName = tty.replace(/^\/dev\//, '')
   let stdout: string
   try {
@@ -81,7 +82,7 @@ export async function agentProcessForTty(
   }
   const occ = classifyPs(stdout)
   const fg = foregroundProcess(stdout)
-  if ((occ.kind !== 'claude' && occ.kind !== 'codex') || !fg) return null
+  if (!isAgentKind(occ.kind) || !fg) return null
   return { kind: occ.kind, pid: fg.pid, command: fg.command }
 }
 
@@ -93,4 +94,12 @@ export async function occupantForTty(tty: string): Promise<Occupant> {
   } catch {
     return { kind: 'unknown', command: null } // ps exits 1 when tty has no processes
   }
+}
+
+/** A pane's occupant: process detection, overridden by a manual mark (`termbus mark`). */
+export async function occupantForPane(
+  pane: Pick<Pane, 'id' | 'tty'>,
+  marks: Record<string, string> = loadMarks(),
+): Promise<Occupant & { marked?: true }> {
+  return applyMarkToOccupant(await occupantForTty(pane.tty), marks[pane.id])
 }

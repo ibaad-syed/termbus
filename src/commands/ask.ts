@@ -4,12 +4,12 @@ import { readFile } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 import { detectBackend } from '../backends/detect.js'
 import { askAgent, askShell, defaultClock, type AskDeps, type PermissionPolicy } from '../core/ask.js'
-import { resolveMode, waitForIdle, type DeliveryMode } from '../core/delivery.js'
+import { isAgentKind, resolveMode, waitForIdle, type DeliveryMode } from '../core/delivery.js'
 import { buildEnvelope, detectSenderKind, envelopeId, type Sender } from '../core/envelope.js'
 import { TermbusError } from '../core/errors.js'
-import { occupantForTty } from '../core/occupant.js'
+import { occupantForPane } from '../core/occupant.js'
 import { resolveTarget } from '../core/resolve.js'
-import type { AgentKind, AskResult, Backend, Pane } from '../core/types.js'
+import type { AskResult, Backend, Pane } from '../core/types.js'
 
 function makeDeps(backend: Backend): AskDeps {
   return {
@@ -39,24 +39,24 @@ async function askPane(
 ): Promise<AskResult> {
   const pane = resolveTarget(panes, target)
   if (pane.isSelf) throw new TermbusError('refusing to ask self (this pane) — would deadlock')
-  let occ = await occupantForTty(pane.tty)
+  let occ = await occupantForPane(pane)
   if (occ.kind === 'command' && opts.mode === 'wait') {
     // a foreground command owns the pane — wait for it to finish, then re-probe
     await waitForIdle(
-      { ...deps, probeOccupant: () => occupantForTty(pane.tty) },
+      { ...deps, probeOccupant: () => occupantForPane(pane) },
       pane,
       occ,
       { timeoutMs: opts.timeoutMs, pollMs: 1000 },
     )
-    occ = await occupantForTty(pane.tty)
+    occ = await occupantForPane(pane)
   }
   if (occ.kind === 'shell') {
     return askShell(deps, pane, prompt, nonce(), { timeoutMs: opts.timeoutMs, pollMs: 1000 })
   }
-  if (occ.kind === 'claude' || occ.kind === 'codex') {
+  if (isAgentKind(occ.kind)) {
     // envelope goes in front; askAgent appends the mailbox transport trailer
     if (opts.sender) prompt = `${buildEnvelope(opts.sender, envelopeId())} ${prompt}`
-    return askAgent(deps, pane, occ.kind as AgentKind, prompt, nonce(), {
+    return askAgent(deps, pane, occ.kind, prompt, nonce(), {
       timeoutMs: opts.timeoutMs,
       pollMs: 1000,
       minWaitMs: 3000,
@@ -66,7 +66,7 @@ async function askPane(
     })
   }
   throw new TermbusError(
-    `pane ${pane.label} is running "${occ.command ?? 'unknown'}" — ask supports shell/claude/codex panes (add --wait if a command is still running); use \`termbus send --raw\` for other TUIs`,
+    `pane ${pane.label} is running "${occ.command ?? 'unknown'}" — ask supports shell and agent panes (claude/codex/devin, agents.json types, or panes set with termbus mark) (add --wait if a command is still running); use \`termbus send --raw\` for other TUIs`,
   )
 }
 

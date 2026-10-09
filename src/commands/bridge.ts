@@ -17,8 +17,10 @@ import { parseSpawnRequest, SPAWN_LIMIT, SPAWN_WINDOW_MS, SpawnLimiter, spawnShe
 import { launchScript } from '../restore/resume-command.js'
 import { buildEnvelope, envelopeId } from '../core/envelope.js'
 import { TermbusError } from '../core/errors.js'
-import { agentProcessForTty, occupantForTty } from '../core/occupant.js'
+import { agentProcessForTty, occupantForPane } from '../core/occupant.js'
 import { probeAgentIdentity } from '../restore/identity.js'
+import { agentLabel } from '../core/agents.js'
+import { applyMark, loadMarks, marksFile, updateMarks } from '../core/marks.js'
 import { looksLikeQuestionDialog } from '../core/idle.js'
 import { executeScreenAnswer, parseClaudeQuestionScreen, SCREEN_CALL_PREFIX, type ScreenAnswer } from '../core/claude-question-screen.js'
 import { planAnswerSteps, runAnswerSteps, validateAnswers, verifyFreshDialog, type QuestionAnswer } from '../core/question.js'
@@ -73,7 +75,7 @@ const BRIDGE_VERSION = (() => {
   }
 })()
 /** What this bridge can do — HQ holds back actions an older bridge can't run. */
-const BRIDGE_CAPABILITIES = ['spawn', 'exec', 'org']
+const BRIDGE_CAPABILITIES = ['spawn', 'exec', 'org', 'mark']
 
 const FOOTER_LINES = 15 // prompt fingerprints stay footer-scoped
 const PEEK_LINES = 60 // terminal view in HQ
@@ -87,12 +89,27 @@ interface HqAction {
   id: number
   paneId: string
   paneLabel: string
-  kind: 'approve' | 'reject' | 'send' | 'rename' | 'answer' | 'spawn' | 'exec' | 'org'
+  kind: 'approve' | 'reject' | 'send' | 'rename' | 'answer' | 'spawn' | 'exec' | 'org' | 'mark'
   payload: string | null
   promptFingerprint: string | null
   /** the conversation (chat) this action is meant for — the pane must still run it */
   sessionId?: string | null
+  /** send only: who wrote the message — the user, or HQ's Conductor (an AI
+   *  acting for the user). Missing = the user (older HQ). */
+  origin?: string
 }
+
+/**
+ * Envelope sender label for an HQ send. `hq` = the user, via the HQ app;
+ * `conductor` = the user's HQ Conductor, an AI coordinator — agents are told
+ * (SKILL.md) not to treat it as the user's authorization for risky actions.
+ * Fail-safe: anything other than a missing or 'user' origin is the conductor.
+ */
+export function hqSenderLabel(origin: unknown): 'hq' | 'conductor' {
+  return origin === undefined || origin === null || origin === 'user' ? 'hq' : 'conductor'
+}
+
+type SyncSnapshot = WatchSnapshot & { occupant: string; agent: boolean; agentLabel: string | null; marked: boolean; screen?: string }
 
 async function api(base: string, secret: string, path: string, init?: RequestInit): Promise<Response> {
   return fetch(`${base}${path}`, {
@@ -105,20 +122,25 @@ async function api(base: string, secret: string, path: string, init?: RequestIni
   })
 }
 
-async function snapshotPanes(backend: Backend, panes?: Pane[]): Promise<Array<WatchSnapshot & { occupant: string; screen?: string }>> {
+async function snapshotPanes(backend: Backend, panes?: Pane[]): Promise<SyncSnapshot[]> {
   panes = panes ?? (await backend.listPanes())
-  const out: Array<WatchSnapshot & { occupant: string; screen?: string }> = []
+  const out: SyncSnapshot[] = []
+  const marks = loadMarks()
   for (const p of panes.filter((x: Pane) => !x.isSelf)) {
     try {
-      const occ = await occupantForTty(p.tty)
+      const occ = await occupantForPane(p, marks)
       const screen = isAgentKind(occ.kind) ? await backend.readScreen(p.id) : ''
       const state = paneState(occ, screen)
-      const snap: WatchSnapshot & { occupant: string; screen?: string } = {
+      const snap: SyncSnapshot = {
         id: p.id,
         label: p.label,
         title: p.title,
         state,
         occupant: occ.kind,
+        // HQ needs no hard-coded agent kinds: the registry says what's an agent
+        agent: isAgentKind(occ.kind),
+        agentLabel: agentLabel(occ.kind),
+        marked: occ.marked === true,
       }
       // agent panes ship a footer preview so HQ can render a quick peek;
       // shells/commands never leak screen content
@@ -133,7 +155,7 @@ async function snapshotPanes(backend: Backend, panes?: Pane[]): Promise<Array<Wa
 
 /** True when an agent pane's screen is an interactive question dialog. */
 function isQuestionScreen(occupant: string, screen: string | undefined): boolean {
-  return !!screen && (occupant === 'claude' || occupant === 'codex') && looksLikeQuestionDialog(occupant, screen)
+  return !!screen && isAgentKind(occupant) && looksLikeQuestionDialog(occupant, screen)
 }
 
 /**
@@ -201,6 +223,40 @@ export async function executeSpawn(
   ctx.anchorPaneId = paneId
   if (req.name && backend.setPaneName) await backend.setPaneName(paneId, req.name).catch(() => {})
   return { status: 'done', outcome: paneId }
+}
+
+/**
+ * HQ marks a pane as an agent kind (payload {kind}) or clears the mark
+ * ({kind: null}). Clearing only removes a manual mark — a pane detected by
+ * process can't be "unmarked".
+ */
+export function executeMark(
+  action: Pick<HqAction, 'paneId' | 'payload'>,
+  openPaneIds: string[],
+  path = marksFile(),
+): { status: string; outcome?: string } {
+  let body: { kind?: unknown }
+  try {
+    body = JSON.parse(action.payload ?? '')
+  } catch {
+    return { status: 'failed', outcome: 'mark payload is not JSON' }
+  }
+  const kind = body?.kind
+  if (kind !== null && typeof kind !== 'string') return { status: 'failed', outcome: 'kind must be an agent kind or null' }
+  if (typeof action.paneId !== 'string' || !/^[\w-]{1,200}$/.test(action.paneId)) return { status: 'failed', outcome: 'bad pane id' }
+  const paneId = action.paneId
+  try {
+    if (kind === null) {
+      if (!(paneId in loadMarks(path))) return { status: 'failed', outcome: 'this pane was detected automatically, not marked' }
+      updateMarks((m) => applyMark(m, paneId, null), path)
+      return { status: 'done', outcome: 'unmarked' }
+    }
+    if (!openPaneIds.includes(paneId)) return { status: 'failed', outcome: 'pane no longer exists' }
+    updateMarks((m) => applyMark(m, paneId, kind), path)
+    return { status: 'done', outcome: `marked as ${kind}` }
+  } catch (e) {
+    return { status: 'failed', outcome: e instanceof Error ? e.message : String(e) }
+  }
 }
 
 /** HQ edits a department (create/delete/rename/add/remove) on this Mac's org. */
@@ -276,6 +332,7 @@ async function executeAction(
     return spawnCtx ? executeSpawn(backend, action, spawnCtx) : { status: 'failed', outcome: 'spawning is not enabled' }
   }
   if (action.kind === 'org') return executeOrg(action)
+  if (action.kind === 'mark') return executeMark(action, (await backend.listPanes()).map((p) => p.id))
   if (action.kind === 'exec') {
     const cfg = readConfig() // fresh: toggles apply without a restart
     return executeExec(action, { allowExec: cfg.allowExec === true, allowAutoExec: cfg.allowAutoExec === true })
@@ -283,7 +340,7 @@ async function executeAction(
   const panes = await backend.listPanes()
   const pane = panes.find((p) => p.id === action.paneId)
   if (!pane) return { status: 'failed', outcome: 'pane no longer exists' }
-  const occ = await occupantForTty(pane.tty)
+  const occ = await occupantForPane(pane)
 
   if (action.sessionId && ['send', 'approve', 'reject', 'answer'].includes(action.kind)) {
     const wrong = await checkTargetSession(pane.tty, action.sessionId)
@@ -354,7 +411,7 @@ async function executeAction(
     // the pane is a shell now and the text would run as a command — refuse.
     if (!isAgentKind(occ.kind)) return { status: 'failed', outcome: 'no agent is running in that pane any more' }
     const { outcome } = await ensureDeliverable(
-      { backend, clock: defaultClock, probeOccupant: () => occupantForTty(pane.tty) },
+      { backend, clock: defaultClock, probeOccupant: () => occupantForPane(pane) },
       pane,
       occ,
       'queue',
@@ -363,9 +420,9 @@ async function executeAction(
     // one line only: if the agent exits mid-send, a newline would run the first line in the shell
     // no control characters: \x03 quits an agent, \x0f submits in zsh…
     const text = action.payload.replace(/[\u0000-\u001f\u007f]+/g, ' ')
-    const enveloped = `${buildEnvelope({ label: 'hq', kind: 'shell' }, envelopeId())} ${text}`
+    const enveloped = `${buildEnvelope({ label: hqSenderLabel(action.origin), kind: 'shell' }, envelopeId())} ${text}`
     // re-check right before typing: the wait above may have spanned a dialog or an exit
-    const before = await occupantForTty(pane.tty)
+    const before = await occupantForPane(pane)
     if (!isAgentKind(before.kind)) return { status: 'failed', outcome: 'no agent is running in that pane any more' }
     if (paneState(before, await backend.readScreen(pane.id)) === 'awaiting-input') {
       return { status: 'failed', outcome: 'the agent is showing a prompt — answer it first' }
@@ -374,7 +431,7 @@ async function executeAction(
     // Enter goes separately (TUIs treat text+CR as a paste) — and only if no
     // dialog popped up meanwhile, where Enter would answer it.
     await defaultClock.sleep(200)
-    const now = await occupantForTty(pane.tty)
+    const now = await occupantForPane(pane)
     const screen = isAgentKind(now.kind) ? await backend.readScreen(pane.id) : ''
     if (!isAgentKind(now.kind) || paneState(now, screen) === 'awaiting-input') {
       return { status: 'failed', outcome: 'a prompt appeared while sending — the text is in the input box, not submitted' }
@@ -523,6 +580,9 @@ export async function cmdBridge(argv: string[]): Promise<void> {
               label: s.label,
               title: s.title,
               occupant: s.occupant,
+              agent: s.agent,
+              agentLabel: s.agentLabel,
+              marked: s.marked,
               state: s.state,
               screen: s.screen,
             })),

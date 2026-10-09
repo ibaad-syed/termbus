@@ -1,5 +1,5 @@
 import { detectBackend } from '../backends/detect.js'
-import { occupantForTty } from '../core/occupant.js'
+import { occupantForPane } from '../core/occupant.js'
 
 export async function cmdWhoami(): Promise<void> {
   const backend = detectBackend()
@@ -9,6 +9,6 @@ export async function cmdWhoami(): Promise<void> {
     console.log('not identifiable (ITERM_SESSION_ID unset?) — run inside an iTerm2 pane')
     return
   }
-  const occ = await occupantForTty(self.tty)
+  const occ = await occupantForPane(self)
   console.log(JSON.stringify({ ...self, occupant: occ.kind, backend: backend.name }, null, 2))
 }

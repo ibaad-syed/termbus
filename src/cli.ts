@@ -11,6 +11,7 @@ Usage:
   termbus ask --batch '{"target":"prompt",...}' [--timeout S] [--mailbox]
   termbus broadcast <@dept|@all|a,b,c> <text>  one message to many agents (busy ones get it queued)
   termbus dept list|create|add|remove|rename|delete   group agents into departments
+  termbus mark <target> <kind> / unmark <target>      treat a pane's program as an agent kind
   termbus watch [target ...] [--interval S] [--notify] [--push <target>]
   termbus bridge --relay <url> --secret <s>  connect this Mac to termbus-hq
   termbus restore [--dry-run] [--list]     reopen agents from before a restart, each resuming its conversation
@@ -30,6 +31,9 @@ ask surfaces them (exit 5) with instructions; --on-permission approve|return|fai
 sets the policy (approve presses Enter for you — opt-in, use with care).
 watch alerts when a pane needs attention (--notify macOS banner, --push <pane>
 queues a heads-up message to a supervisor pane).
+
+Agents: claude, codex and devin are built in (devin state detection is
+preliminary); more types go in ~/.termbus/agents.json — see the README.
 
 Targets: session id, label (w1.t2.p1), tty (ttys009), title substring, or "self".
 Groups (send/broadcast): @<department>, @all (every agent but you), or a,b,c.
@@ -56,6 +60,10 @@ async function main(): Promise<void> {
     case 'dept':
     case 'department':
       return (await import('./commands/dept.js')).cmdDept(rest)
+    case 'mark':
+      return (await import('./commands/mark.js')).cmdMark(rest)
+    case 'unmark':
+      return (await import('./commands/mark.js')).cmdUnmark(rest)
     case 'snapshot':
       return (await import('./commands/snapshot.js')).cmdSnapshot(rest)
     case 'restore':

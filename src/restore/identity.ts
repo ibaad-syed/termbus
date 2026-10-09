@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import type { AgentKind } from '../core/types.js'
+import { devinSessionForTui, psProcs, readDevinLocks } from '../transcripts/devin.js'
 
 const execFileP = promisify(execFile)
 
@@ -124,18 +125,26 @@ export interface AgentIdentity {
 export async function probeAgentIdentity(
   kind: AgentKind,
   pid: number,
-  opts: { claudeSessionsDir?: string } = {},
+  opts: { claudeSessionsDir?: string; devinRoot?: string } = {},
 ): Promise<AgentIdentity> {
   const cwd = await processCwd(pid)
   let found: { sessionId: string; cwd: string | null } | null = null
-  if (kind === 'claude') {
+  if (kind === 'devin') {
+    // the TUI's `devin acp` child holds session_locks/<id>.lock (its pid inside)
+    try {
+      const id = devinSessionForTui(pid, await psProcs(), await readDevinLocks(opts.devinRoot))
+      if (id) found = { sessionId: id, cwd: null }
+    } catch {
+      // ps failed: identity unknown
+    }
+  } else if (kind === 'claude') {
     const dir = opts.claudeSessionsDir ?? join(homedir(), '.claude', 'sessions')
     try {
       found = claudeSessionFromFile(await readFile(join(dir, `${pid}.json`), 'utf8'), await procStartOf(pid))
     } catch {
       // older Claude Code without per-pid session files
     }
-  } else {
+  } else if (kind === 'codex') {
     found = codexMainThread(await codexOpenRollouts(pid))
   }
   return {
@@ -143,7 +152,7 @@ export async function probeAgentIdentity(
     // process started, and /clear or a fork may have moved it since.
     sessionId: found?.sessionId ?? null,
     // Claude files sessions under the directory it was launched in, so resume
-    // must start there; Codex resumes from anywhere, the process cwd is truth
+    // must start there; Codex and Devin resume from anywhere, the process cwd is truth
     cwd: kind === 'claude' ? (found?.cwd ?? cwd) : (cwd ?? found?.cwd ?? null),
   }
 }
