@@ -9,9 +9,10 @@ You've got Claude Code in one pane, Codex in another, a dev server in a third. T
 ```sh
 npm install -g termbus
 termbus install-skill   # teaches Claude Code to use it
+termbus update          # later: get the latest version
 ```
 
-No daemon. No hooks. No config. It observes the sessions you already have open — if you close termbus, nothing dies.
+No hooks. No config. It observes the sessions you already have open — if you close termbus, nothing dies. And if your Mac restarts, `termbus restore` brings every agent back, mid-conversation.
 
 ## What you can do
 
@@ -21,6 +22,7 @@ termbus ask "worker" "run the tests and summarize failures" --timeout 300
 termbus send w1.t2.p1 "also add edge-case tests" --queue    # busy agent? lands in its input queue
 termbus check "dev server"                # read any pane's screen without touching it
 termbus watch --notify                    # macOS alert when any agent needs you
+termbus restore                           # after a restart: reopen every agent, same conversations
 ```
 
 Or don't type any of this — after `install-skill`, just tell your Claude:
@@ -33,6 +35,22 @@ Or don't type any of this — after `install-skill`, just tell your Claude:
 - **Never interrupts by default.** Busy agents refuse messages unless you choose: `--queue` (their native input queue — they see it mid-turn), `--wait` (deliver when idle), or `--force`.
 - **Agents know who's talking.** Messages carry a sender envelope (`[termbus-msg v=1 from=w1.t1.p2 kind=claude …]`) so a receiving agent can reply to the right pane — and never mistakes a peer for its human.
 - **Works across models.** Claude Code, Codex, plain shells, dev servers — one interface. New agent TUIs are a few regexes to add.
+
+## Survive a restart
+
+Restart your Mac (or quit iTerm2) and your agents normally vanish — you're left re-opening panes and hunting for `--resume` IDs. termbus remembers them instead:
+
+```sh
+termbus restore --dry-run   # preview what comes back
+termbus restore             # reopen it
+```
+
+- **Every agent resumes its own conversation** — Claude Code and Codex, in the directory it ran in, with its permission flags (`--dangerously-skip-permissions`, `--yolo`, model…) when they can be read unambiguously.
+- **Your layout comes back** — windows, tabs, and each tab's split arrangement (side by side, stacked, nested). Shells and dev-server panes reopen as shells in their directory; their commands are not re-run.
+- **Nothing is duplicated** — agents still running anywhere are skipped, so running `restore` twice is harmless.
+- **It's automatic.** The first time you run termbus, it starts remembering in the background (a small launchd service; turn off with `termbus snapshot --uninstall`). After a restart you get a notification telling you how many agents can come back. `termbus restore --list` shows saved snapshots; `--generation N` restores an older one.
+
+Under the hood: Claude Code's session is read from its per-process session file, Codex's from the session log it holds open; pane sizes reveal each tab's split tree. Nothing is ever typed into a pane — each restored pane launches its own resume command.
 
 ## How it works
 
@@ -73,6 +91,7 @@ That installs a launchd service (runs at login, restarts automatically) streamin
 - Never targets its own pane, never auto-answers a dialog unless you opted in
 - After a timeout it tells the caller to `check`, never to re-send
 - Remote approvals are per-prompt fingerprint-verified; the bridge connects outbound only and holds no inbound port
+- Restore never guesses: an agent whose conversation can't be identified is skipped, never resumed into the wrong one; prompts are never replayed; the background snapshotter never launches iTerm2
 
 ## Roadmap
 
