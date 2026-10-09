@@ -9,6 +9,7 @@ import { detectBackend } from '../backends/detect.js'
 import { defaultClock } from '../core/ask.js'
 import { ensureDeliverable, isAgentKind, paneState } from '../core/delivery.js'
 import { Cadence, paneDigest } from '../core/cadence.js'
+import { parseExecRequest, runExec } from '../core/exec.js'
 import { parseSpawnRequest, SPAWN_LIMIT, SPAWN_WINDOW_MS, SpawnLimiter, spawnShellLine } from '../core/spawn.js'
 import { launchScript } from '../restore/resume-command.js'
 import { buildEnvelope, envelopeId } from '../core/envelope.js'
@@ -26,19 +27,34 @@ const USAGE =
   'Connects this Mac to a termbus-hq deployment (outbound only).\n' +
   '  --save       remember relay+secret in ~/.termbus/config.json (then flags are optional)\n' +
   '  --install    run persistently via launchd (auto-start on login, auto-restart)\n' +
-  '  --uninstall  remove the launchd service'
+  '  --uninstall  remove the launchd service\n' +
+  '  --allow-auto-exec / --no-auto-exec\n' +
+  '               let HQ\'s "Full auto" setting run commands on this Mac without a tap (off by default;\n' +
+  '               commands you approve in HQ, and read-only ones like ps/git status, work either way)'
 
 const CONFIG_FILE = join(homedir(), '.termbus', 'config.json')
 const PLIST_LABEL = 'com.termbus.bridge'
 const PLIST_FILE = join(homedir(), 'Library', 'LaunchAgents', `${PLIST_LABEL}.plist`)
 const execFileAsync = promisify(execFile)
 
-function readConfig(): { relay?: string; secret?: string } {
+interface BridgeConfig {
+  relay?: string
+  secret?: string
+  /** this Mac's local consent for HQ's "Full auto" commands */
+  allowAutoExec?: boolean
+}
+
+function readConfig(): BridgeConfig {
   try {
-    return JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) as { relay?: string; secret?: string }
+    return JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) as BridgeConfig
   } catch {
     return {}
   }
+}
+
+function writeConfig(cfg: BridgeConfig): void {
+  mkdirSync(join(homedir(), '.termbus'), { recursive: true })
+  writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), { mode: 0o600 })
 }
 
 const FOOTER_LINES = 15 // prompt fingerprints stay footer-scoped
@@ -53,7 +69,7 @@ interface HqAction {
   id: number
   paneId: string
   paneLabel: string
-  kind: 'approve' | 'reject' | 'send' | 'rename' | 'answer' | 'spawn'
+  kind: 'approve' | 'reject' | 'send' | 'rename' | 'answer' | 'spawn' | 'exec'
   payload: string | null
   promptFingerprint: string | null
 }
@@ -167,6 +183,19 @@ export async function executeSpawn(
   return { status: 'done', outcome: paneId }
 }
 
+/** Run a command for HQ's conductor (see src/core/exec.ts for the rules). */
+export async function executeExec(
+  action: Pick<HqAction, 'payload'>,
+  allowAutoExec: boolean,
+): Promise<{ status: string; outcome?: string }> {
+  const req = parseExecRequest(action.payload, { allowAutoExec })
+  if ('error' in req) return { status: 'failed', outcome: req.error }
+  const result = await runExec(req, userInfo().shell || process.env.SHELL || '/bin/zsh')
+  const what = req.kind === 'argv' ? req.argv.join(' ') : `${req.command} (approved: ${req.approvedBy})`
+  console.log(`exec in ${req.cwd}: ${what.slice(0, 200)} → exit ${result.exitCode}`)
+  return { status: 'done', outcome: JSON.stringify(result) }
+}
+
 async function executeAction(
   backend: Backend,
   action: HqAction,
@@ -176,6 +205,7 @@ async function executeAction(
   if (action.kind === 'spawn') {
     return spawnCtx ? executeSpawn(backend, action, spawnCtx) : { status: 'failed', outcome: 'spawning is not enabled' }
   }
+  if (action.kind === 'exec') return executeExec(action, readConfig().allowAutoExec === true)
   const panes = await backend.listPanes()
   const pane = panes.find((p) => p.id === action.paneId)
   if (!pane) return { status: 'failed', outcome: 'pane no longer exists' }
@@ -252,16 +282,28 @@ export async function cmdBridge(argv: string[]): Promise<void> {
       install: { type: 'boolean' },
       uninstall: { type: 'boolean' },
       'no-transcripts': { type: 'boolean' },
+      'allow-auto-exec': { type: 'boolean' },
+      'no-auto-exec': { type: 'boolean' },
     },
   })
   const saved = readConfig()
+  if (values['allow-auto-exec'] || values['no-auto-exec']) {
+    const on = !!values['allow-auto-exec'] && !values['no-auto-exec']
+    writeConfig({ ...saved, allowAutoExec: on })
+    console.log(
+      on
+        ? 'Full auto ALLOWED on this Mac: if HQ\'s Commands setting is "Full auto", the conductor can run any command here without asking. Undo: termbus bridge --no-auto-exec'
+        : 'Full auto is OFF on this Mac: commands need your tap in HQ (read-only ones still run).',
+    )
+    return // read fresh by the running bridge before every command — no restart needed
+  }
   const relay = (values.relay ?? saved.relay)?.replace(/\/$/, '')
   const secret = values.secret ?? process.env.TERMBUS_BRIDGE_SECRET ?? saved.secret
   if (!relay || !secret) throw new TermbusError(USAGE)
 
   if (values.save) {
     mkdirSync(join(homedir(), '.termbus'), { recursive: true })
-    writeFileSync(CONFIG_FILE, JSON.stringify({ relay, secret }, null, 2), { mode: 0o600 })
+    writeConfig({ ...saved, relay, secret })
     console.log(`saved to ${CONFIG_FILE} — future runs can use plain \`termbus bridge\``)
   }
 
@@ -276,7 +318,7 @@ export async function cmdBridge(argv: string[]): Promise<void> {
   if (values.install) {
     if (!values.save) {
       mkdirSync(join(homedir(), '.termbus'), { recursive: true })
-      writeFileSync(CONFIG_FILE, JSON.stringify({ relay, secret }, null, 2), { mode: 0o600 })
+      writeConfig({ ...saved, relay, secret })
     }
     const cliPath = fileURLToPath(new URL('../cli.js', import.meta.url))
     const logPath = join(homedir(), '.termbus', 'bridge.log')
