@@ -23,6 +23,7 @@ termbus send w1.t2.p1 "also add edge-case tests" --queue    # busy agent? lands 
 termbus check "dev server"                # read any pane's screen without touching it
 termbus watch --notify                    # macOS alert when any agent needs you
 termbus restore                           # after a restart: reopen every agent, same conversations
+termbus broadcast @api "pull main and rerun the tests"   # one message to a whole department
 ```
 
 Or don't type any of this — after `install-skill`, just tell your Claude:
@@ -35,6 +36,21 @@ Or don't type any of this — after `install-skill`, just tell your Claude:
 - **Never interrupts by default.** Busy agents refuse messages unless you choose: `--queue` (their native input queue — they see it mid-turn), `--wait` (deliver when idle), or `--force`.
 - **Agents know who's talking.** Messages carry a sender envelope (`[termbus-msg v=1 from=w1.t1.p2 kind=claude …]`) so a receiving agent can reply to the right pane — and never mistakes a peer for its human.
 - **Works across models.** Claude Code, Codex, plain shells, dev servers — one interface. New agent TUIs are a few regexes to add.
+
+## Departments and broadcast
+
+Running a lot of agents? Group them like a company — `api`, `frontend`, `media` — and talk to a team at once:
+
+```sh
+termbus dept create api
+termbus dept add api w1.t2.p1 "billing"    # any targets; `self` adds the current pane
+termbus dept list                          # teams and who's in them; `termbus list` tags panes [@api]
+termbus broadcast @api "the schema changed — rebase and rerun migrations"
+termbus broadcast @all "stop and commit what you have"
+termbus send a,b,c "same message to three agents"
+```
+
+Busy agents get broadcasts in their input queue (`--wait` / `--force` to change that), shell panes are never typed into, and each recipient sees `(to @api)` so it knows the message went to a group. Agents learn all of this from the skill, so they can ask their own department for help. Departments live in `~/.termbus/org.json` on your Mac and survive `termbus restore`.
 
 ## Survive a restart
 
@@ -81,7 +97,15 @@ termbus pairs with a companion web app, **termbus HQ**: every agent session beco
 termbus bridge --relay https://<your-hq> --secret <token> --install
 ```
 
-That installs a launchd service (runs at login, restarts automatically) streaming your panes to HQ over HTTPS — outbound only, nothing listens on your Mac. Sign in, generate the connect command, paste it once. Each person self-hosts their own HQ and sees only their own terminals.
+That installs a launchd service (runs at login, restarts automatically) streaming your panes to HQ over HTTPS — outbound only, nothing listens on your Mac. It only talks to HQ when something changes (plus a heartbeat), and polls fast only while you're looking or a prompt is waiting. Sign in, generate the connect command, paste it once. Each person self-hosts their own HQ and sees only their own terminals.
+
+**The Conductor.** HQ includes a lead agent you chat with instead of juggling panes: it sees your agents and departments, reads their chats, sends messages and broadcasts, opens new Claude/Codex panes for new work (no permission-bypass flags, ever), and organizes agents into departments. It can also run commands on your Mac, in tiers you control:
+
+- read-only commands (`ps`, `git status/log/diff`, `ls`, `lsof -i`…) run directly — in a repo whose own git config could run programs, even those need approval;
+- anything else needs your tap on an approval card in HQ **and** this Mac's one-time consent: `termbus bridge --allow-exec`;
+- HQ's *Full auto* setting skips the tap only if the Mac also allows it: `termbus bridge --allow-auto-exec` (undo with `--no-auto-exec` / `--no-exec`).
+
+Commands run in the background (never in a pane), inside your home directory, with timeouts, and with credentials redacted from their output.
 
 > HQ is a self-hosted Next.js + Postgres app (Vercel + Neon free tiers). It's in early access — [open an issue](https://github.com/ibaad-syed/termbus/issues) if you'd like access or the deploy guide.
 
@@ -92,6 +116,7 @@ That installs a launchd service (runs at login, restarts automatically) streamin
 - After a timeout it tells the caller to `check`, never to re-send
 - Remote approvals are per-prompt fingerprint-verified; the bridge connects outbound only and holds no inbound port
 - Restore never guesses: an agent whose conversation can't be identified is skipped, never resumed into the wrong one; prompts are never replayed; the background snapshotter never launches iTerm2
+- Remote commands need consent on the Mac itself, not just in HQ; spawned agents get no flags; HQ messages are only typed into panes running an agent
 
 ## Roadmap
 
