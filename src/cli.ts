@@ -9,6 +9,8 @@ Usage:
   termbus send <target> <text> [--raw] [--no-submit] [--queue] [--wait] [--timeout S] [--force] [--plain]
   termbus ask <target> <prompt> [--timeout S] [--mailbox] [--queue] [--wait] [--force] [--plain]
   termbus ask --batch '{"target":"prompt",...}' [--timeout S] [--mailbox]
+  termbus broadcast <@dept|@all|a,b,c> <text>  one message to many agents (busy ones get it queued)
+  termbus dept list|create|add|remove|rename|delete   group agents into departments
   termbus watch [target ...] [--interval S] [--notify] [--push <target>]
   termbus bridge --relay <url> --secret <s>  connect this Mac to termbus-hq
   termbus restore [--dry-run] [--list]     reopen agents from before a restart, each resuming its conversation
@@ -30,6 +32,7 @@ watch alerts when a pane needs attention (--notify macOS banner, --push <pane>
 queues a heads-up message to a supervisor pane).
 
 Targets: session id, label (w1.t2.p1), tty (ttys009), title substring, or "self".
+Groups (send/broadcast): @<department>, @all (every agent but you), or a,b,c.
 Never re-send after a timeout — use \`termbus check\` and keep waiting.`
 
 async function main(): Promise<void> {
@@ -48,6 +51,11 @@ async function main(): Promise<void> {
       return (await import('./commands/bridge.js')).cmdBridge(rest)
     case 'ask':
       return (await import('./commands/ask.js')).cmdAsk(rest)
+    case 'broadcast':
+      return (await import('./commands/broadcast.js')).cmdBroadcast(rest)
+    case 'dept':
+    case 'department':
+      return (await import('./commands/dept.js')).cmdDept(rest)
     case 'snapshot':
       return (await import('./commands/snapshot.js')).cmdSnapshot(rest)
     case 'restore':

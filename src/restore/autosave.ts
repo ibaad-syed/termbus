@@ -8,7 +8,7 @@ export const SNAPSHOT_LABEL = 'com.termbus.snapshot'
 export const SNAPSHOT_ARGS = ['snapshot', '--watch', '--interval', '15']
 
 /** Ordinary commands: running one of these may set up background snapshots. */
-const SETUP_ON = new Set(['list', 'check', 'send', 'ask', 'watch', 'bridge', 'whoami', 'install-skill'])
+const SETUP_ON = new Set(['list', 'check', 'send', 'ask', 'watch', 'bridge', 'whoami', 'install-skill', 'broadcast', 'dept', 'department'])
 
 const stateFile = (home: string) => join(home, '.termbus', 'autosave.json')
 

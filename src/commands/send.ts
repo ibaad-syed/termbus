@@ -6,10 +6,13 @@ import { buildEnvelope, detectSenderKind, envelopeId } from '../core/envelope.js
 import { TermbusError } from '../core/errors.js'
 import { occupantForTty } from '../core/occupant.js'
 import { decodeRawEscapes } from '../core/raw.js'
+import { isGroupSpec } from '../core/org.js'
 import { resolveTarget } from '../core/resolve.js'
+import { deliverToMany, printReports } from './broadcast.js'
 
 const USAGE =
-  'usage: termbus send <target> <text> [--raw] [--no-submit] [--queue] [--wait] [--timeout S] [--force] [--plain]'
+  'usage: termbus send <target> <text> [--raw] [--no-submit] [--queue] [--wait] [--timeout S] [--force] [--plain]\n' +
+  '<target> may also be a group: @<department>, @all, or a comma list (a,b,c)'
 
 export async function cmdSend(argv: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
@@ -28,6 +31,17 @@ export async function cmdSend(argv: string[]): Promise<void> {
   const [target, ...textParts] = positionals
   const text = textParts.join(' ')
   if (!target || !text) throw new TermbusError(USAGE)
+  if (isGroupSpec(target)) {
+    // "@api", "@all", "a,b,c": one message to many agents (see `broadcast`)
+    if (values.raw || values['no-submit']) throw new TermbusError('--raw/--no-submit work with a single target only')
+    const r = await deliverToMany(target, text, resolveMode(values), {
+      timeoutMs: (values.timeout ? Number(values.timeout) : 300) * 1000,
+      plain: values.plain,
+    })
+    printReports(r)
+    if (!r.reports.some((x) => x.result !== 'skipped')) process.exitCode = 1
+    return
+  }
   // --raw is deliberate TUI keystroke driving (answering dialogs, menus) —
   // gating it on busy/awaiting-input would block its main use case.
   const mode = values.raw && !values.queue && !values.wait ? 'force' : resolveMode(values)

@@ -22,6 +22,8 @@ You are running inside an iTerm2 pane. Other panes (in this tab, other tabs, oth
 - `termbus whoami` — identify your own pane.
 - `termbus watch [target ...] [--interval S] [--notify] [--push <pane>]` — long-running monitor (give it its own pane). Prints state transitions; when a watched agent stops at a permission prompt it can fire a macOS notification and/or queue a heads-up message to a supervisor pane.
 - `termbus restore [--dry-run]` — after iTerm2 quit or the Mac restarted: reopens the agent panes that were open, each resuming its own conversation (agents still running are skipped). Agent panes are remembered automatically in the background; `termbus restore --list` shows saved snapshots. Use when the user asks to bring back / recover their agents or sessions.
+- `termbus broadcast <@dept|@all|a,b,c> "message"` — one message to many agents at once (`@all` = every agent pane except you). Busy agents get it in their input queue; shell panes are never typed into. Recipients see `(to @dept)` so they know it went to a group. `termbus send` accepts the same group targets.
+- `termbus dept list` — the user's departments (named groups of agent panes, like teams in a company); `termbus list` tags each pane with `[@dept]`. Manage with `termbus dept create <name>`, `dept add <name> <target…>` (use `self` to join one), `dept remove`, `dept rename`, `dept delete`. When you need help from a team, prefer messaging its department over guessing a pane.
 
 ## Sender attribution (message envelopes)
 

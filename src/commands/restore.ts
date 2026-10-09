@@ -6,6 +6,7 @@ import { detectBackend } from '../backends/detect.js'
 import { defaultClock } from '../core/ask.js'
 import { TermbusError } from '../core/errors.js'
 import type { Backend } from '../core/types.js'
+import { loadOrg, remapMembers, saveOrg } from '../core/org.js'
 import { liveAgents, snapshotFile, terminalInstance } from '../restore/capture.js'
 import { describeTree, planRestore, tabLayout, type LeafSpec } from '../restore/plan.js'
 import { firstLeaf, type SplitTree } from '../restore/layout.js'
@@ -170,22 +171,32 @@ async function runRestore(backend: Backend, gen: Generation, dryRun: boolean): P
     if (spec.agent) opened.push(spec.agent.sessionId!)
     return { command: /\s/.test(script) ? `"${script}"` : script, profile: spec.profile ?? undefined }
   }
+  // saved pane id → new pane id, so department memberships follow the agents
+  const remap = new Map<string, string>()
+  const placed = (spec: LeafSpec, paneId: string) => {
+    if (spec.agent) remap.set(spec.agent.paneId, paneId)
+  }
   const build = async (tree: SplitTree, pane: string, leaves: Map<number, LeafSpec>): Promise<void> => {
     if ('leaf' in tree) return
-    const created = await backend.splitPane!(pane, { ...optsFor(leaves.get(firstLeaf(tree.b))!), stacked: tree.dir === 'h' })
+    const spec = leaves.get(firstLeaf(tree.b))!
+    const created = await backend.splitPane!(pane, { ...optsFor(spec), stacked: tree.dir === 'h' })
+    placed(spec, created)
     await build(tree.a, pane, leaves)
     await build(tree.b, created, leaves)
   }
   for (const win of tabs) {
     let anchor: string | null = null // a pane in this window, for new tabs
     for (const { tree, leaves } of win) {
-      const opts = optsFor(leaves.get(firstLeaf(tree))!)
+      const rootSpec = leaves.get(firstLeaf(tree))!
+      const opts = optsFor(rootSpec)
       const root: string = anchor ? await backend.createTab(anchor, opts) : await backend.createWindow(opts)
+      placed(rootSpec, root)
       anchor ??= root
       await build(tree, root, leaves)
     }
   }
   console.log(`reopened ${opened.length} agent pane${opened.length === 1 ? '' : 's'}`)
+  if (remap.size > 0) saveOrg(remapMembers(loadOrg(), remap))
   // hold the lock until the agents are visibly running, so a second restore
   // started right now cannot mistake them for missing and open them again
   const deadline = Date.now() + 30_000
