@@ -8,6 +8,7 @@ import { parseArgs, promisify } from 'node:util'
 import { detectBackend } from '../backends/detect.js'
 import { defaultClock } from '../core/ask.js'
 import { ensureDeliverable, isAgentKind, paneState } from '../core/delivery.js'
+import { Cadence, paneDigest } from '../core/cadence.js'
 import { buildEnvelope, envelopeId } from '../core/envelope.js'
 import { TermbusError } from '../core/errors.js'
 import { occupantForTty } from '../core/occupant.js'
@@ -279,6 +280,7 @@ export async function cmdBridge(argv: string[]): Promise<void> {
   let failures = 0
   // panes we delivered a send to and owe HQ the agent's reply
   const awaitingReply = new Map<string, { label: string; since: number; sawBusy: boolean }>()
+  const cadence = new Cadence()
   for (;;) {
     try {
       const allPanes = await backend.listPanes()
@@ -297,22 +299,28 @@ export async function cmdBridge(argv: string[]): Promise<void> {
           ...(ev.to === 'awaiting-input' && snap && isQuestionScreen(snap.occupant, snap.screen) ? { dialog: 'question' } : {}),
         }
       })
-      const sync = await api(relay, secret, '/api/bridge/sync', {
-        method: 'POST',
-        body: JSON.stringify({
-          panes: snaps.map((s) => ({
-            paneId: s.id,
-            label: s.label,
-            title: s.title,
-            occupant: s.occupant,
-            state: s.state,
-            screen: s.screen,
-          })),
-          events,
-        }),
-      })
-      if (!sync.ok) throw new Error(`sync ${sync.status}`)
-      prev = applySnapshots(prev, snaps) // only after the relay has the events — a failed POST retries them
+      const now = Date.now()
+      cadence.observe(now, snaps, events.length > 0)
+      const digest = paneDigest(snaps)
+      if (cadence.shouldSync(now, digest, events.length > 0)) {
+        const sync = await api(relay, secret, '/api/bridge/sync', {
+          method: 'POST',
+          body: JSON.stringify({
+            panes: snaps.map((s) => ({
+              paneId: s.id,
+              label: s.label,
+              title: s.title,
+              occupant: s.occupant,
+              state: s.state,
+              screen: s.screen,
+            })),
+            events,
+          }),
+        })
+        if (!sync.ok) throw new Error(`sync ${sync.status}`)
+        cadence.synced(now, digest)
+        prev = applySnapshots(prev, snaps) // only after the relay has the events — a failed POST retries them
+      }
 
       if (feeder) {
         await feeder.tick(allPanes)
@@ -360,14 +368,17 @@ export async function cmdBridge(argv: string[]): Promise<void> {
         }
       }
 
-      const work = await api(relay, secret, '/api/bridge/work')
-      if (work.ok) {
+      if (awaitingReply.size > 0) cadence.activity(Date.now()) // a reply is on its way
+      const work = cadence.shouldPollWork(Date.now()) ? await api(relay, secret, '/api/bridge/work') : null
+      if (work) cadence.polledWork(Date.now())
+      if (work?.ok) {
         const { actions } = (await work.json()) as { actions: HqAction[] }
         for (const action of actions) {
           const result = await executeAction(backend, action, feeder).catch((e: unknown) => ({
             status: 'failed',
             outcome: e instanceof Error ? e.message : String(e),
           }))
+          cadence.activity(Date.now()) // the user is interacting: keep polling fast
           console.log(`action #${action.id} ${action.kind} → ${action.paneLabel}: ${result.status}${result.outcome ? ` (${result.outcome})` : ''}`)
           if (action.kind === 'send' && result.status === 'done') {
             awaitingReply.set(action.paneId, { label: action.paneLabel, since: Date.now(), sawBusy: false })
