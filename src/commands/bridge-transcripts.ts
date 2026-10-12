@@ -1,16 +1,14 @@
-import { execFile } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { promisify } from 'node:util'
 import { discoverSessions, SessionTailer } from '../transcripts/index.js'
 import type { SessionInfo, TailerState, TranscriptEvent, TranscriptQuestionItem } from '../transcripts/index.js'
-import { occupantForTty } from '../core/occupant.js'
+import { agentProcessForTty } from '../core/occupant.js'
+import { probeAgentIdentity } from '../restore/identity.js'
 import type { Pane } from '../core/types.js'
 import { randomUUID } from 'node:crypto'
 import { screenCallId, type ClaudeScreenQuestion } from '../core/claude-question-screen.js'
 
-const execFileP = promisify(execFile)
 
 /** Reserved epoch namespace for bridge-synthesized events (permission
  * requests come from screen detection, not the transcript files, so they
@@ -75,50 +73,33 @@ function saveState(state: PersistedState): void {
 }
 
 /**
- * Link sessions to panes: same agent kind + one cwd is a prefix of the other.
- * Ambiguity resolves to the most recently active session; a session links to
- * at most one pane and vice versa. Pure — unit-testable.
+ * Link sessions to panes. EXACT first: each agent pane reports the
+ * conversation its process is running (Claude's per-pid session file, the
+ * rollout Codex holds open — see restore/identity.ts). Only panes whose
+ * identity can't be read fall back to matching by working directory, and
+ * only when that match is unambiguous (one session ↔ one pane). Several
+ * agents in the same folder used to be paired by "most recently active",
+ * which scrambled them — and HQ then typed messages into the wrong agent.
+ * An unlinked chat is safe; a wrongly linked one is not. Pure — unit-testable.
  */
 export function linkSessionsToPanes(
   sessions: Array<Pick<SessionInfo, 'sessionId' | 'agent' | 'cwd' | 'lastActivity'>>,
-  panes: Array<{ paneId: string; kind: string; cwd: string | null }>,
+  panes: Array<{ paneId: string; kind: string; cwd: string | null; sessionId?: string | null }>,
 ): Map<string, string> {
   const links = new Map<string, string>() // sessionId → paneId
-  const takenPanes = new Set<string>()
-  const sorted = [...sessions].sort((a, b) => b.lastActivity - a.lastActivity)
-  for (const s of sorted) {
-    if (!s.cwd) continue
-    const candidates = panes.filter(
-      (p) =>
-        !takenPanes.has(p.paneId) &&
-        p.kind === s.agent &&
-        p.cwd !== null &&
-        (p.cwd.startsWith(s.cwd!) || s.cwd!.startsWith(p.cwd)),
-    )
-    if (candidates.length === 0) continue
-    // prefer the longest common path (most specific match)
-    candidates.sort((a, b) => Math.min(b.cwd!.length, s.cwd!.length) - Math.min(a.cwd!.length, s.cwd!.length))
-    links.set(s.sessionId, candidates[0].paneId)
-    takenPanes.add(candidates[0].paneId)
+  for (const p of panes) if (p.sessionId) links.set(p.sessionId, p.paneId)
+  const unknownPanes = panes.filter((p) => !p.sessionId && p.cwd !== null)
+  const loose = sessions.filter((s) => s.cwd && !links.has(s.sessionId))
+  const matches = (s: (typeof loose)[number], p: (typeof unknownPanes)[number]) =>
+    p.kind === s.agent && (p.cwd!.startsWith(s.cwd!) || s.cwd!.startsWith(p.cwd!))
+  for (const s of loose) {
+    const cands = unknownPanes.filter((p) => matches(s, p))
+    if (cands.length !== 1) continue
+    // …and that pane must not match any other unlinked session either
+    if (loose.filter((o) => matches(o, cands[0])).length !== 1) continue
+    links.set(s.sessionId, cands[0].paneId)
   }
   return links
-}
-
-async function paneCwd(tty: string): Promise<string | null> {
-  try {
-    const ttyName = tty.replace(/^\/dev\//, '')
-    const { stdout } = await execFileP('ps', ['-t', ttyName, '-o', 'pid=,comm='])
-    const agentRow = stdout
-      .split('\n')
-      .map((l) => l.trim().match(/^(\d+)\s+(.*)$/))
-      .find((m) => m && /(^|\/)(claude|codex)$/.test(m[2]))
-    if (!agentRow) return null
-    const { stdout: lsofOut } = await execFileP('lsof', ['-a', '-p', agentRow[1], '-d', 'cwd', '-Fn'])
-    const line = lsofOut.split('\n').find((l) => l.startsWith('n'))
-    return line ? line.slice(1) : null
-  } catch {
-    return null
-  }
 }
 
 export interface FeederApi {
@@ -141,7 +122,6 @@ export class TranscriptFeeder {
     return this.openQuestions.get(callId)
   }
   private links = new Map<string, string>()
-  private paneCwdCache = new Map<string, string | null>()
   private tickCount = 0
 
   constructor(private readonly api: FeederApi) {}
@@ -157,13 +137,14 @@ export class TranscriptFeeder {
   async refreshLinks(panes: Pane[], sessions?: SessionInfo[]): Promise<void> {
     const list = sessions ?? this.lastSessions
     if (sessions) this.lastSessions = sessions
-    const agentPanes: Array<{ paneId: string; kind: string; cwd: string | null }> = []
+    const agentPanes: Array<{ paneId: string; kind: string; cwd: string | null; sessionId: string | null }> = []
     for (const p of panes) {
-      const occ = await occupantForTty(p.tty)
-      if (occ.kind !== 'claude' && occ.kind !== 'codex') continue
-      // null means the probe failed (process may have been starting) — retry those
-      if (!this.paneCwdCache.get(p.id)) this.paneCwdCache.set(p.id, await paneCwd(p.tty))
-      agentPanes.push({ paneId: p.id, kind: occ.kind, cwd: this.paneCwdCache.get(p.id) ?? null })
+      const proc = await agentProcessForTty(p.tty)
+      if (!proc) continue
+      // which conversation is this process running? (re-read every refresh:
+      // /clear or a resume switches it)
+      const id = await probeAgentIdentity(proc.kind, proc.pid)
+      agentPanes.push({ paneId: p.id, kind: proc.kind, cwd: id.cwd, sessionId: id.sessionId })
     }
     this.links = linkSessionsToPanes(
       list.map((s) => ({ sessionId: s.sessionId, agent: s.agent, cwd: s.cwd, lastActivity: s.lastActivity })),

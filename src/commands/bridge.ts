@@ -17,7 +17,8 @@ import { parseSpawnRequest, SPAWN_LIMIT, SPAWN_WINDOW_MS, SpawnLimiter, spawnShe
 import { launchScript } from '../restore/resume-command.js'
 import { buildEnvelope, envelopeId } from '../core/envelope.js'
 import { TermbusError } from '../core/errors.js'
-import { occupantForTty } from '../core/occupant.js'
+import { agentProcessForTty, occupantForTty } from '../core/occupant.js'
+import { probeAgentIdentity } from '../restore/identity.js'
 import { looksLikeQuestionDialog } from '../core/idle.js'
 import { executeScreenAnswer, parseClaudeQuestionScreen, SCREEN_CALL_PREFIX, type ScreenAnswer } from '../core/claude-question-screen.js'
 import { planAnswerSteps, runAnswerSteps, validateAnswers, verifyFreshDialog, type QuestionAnswer } from '../core/question.js'
@@ -89,6 +90,8 @@ interface HqAction {
   kind: 'approve' | 'reject' | 'send' | 'rename' | 'answer' | 'spawn' | 'exec' | 'org'
   payload: string | null
   promptFingerprint: string | null
+  /** the conversation (chat) this action is meant for — the pane must still run it */
+  sessionId?: string | null
 }
 
 async function api(base: string, secret: string, path: string, init?: RequestInit): Promise<Response> {
@@ -240,6 +243,29 @@ export async function executeExec(
   return { status: 'done', outcome: JSON.stringify(result) }
 }
 
+/**
+ * The pane must be running the conversation the action was meant for. HQ
+ * maps a chat to a pane; if that mapping is stale or wrong (several agents in
+ * one folder, a /clear, a restart), typing would hit the wrong agent.
+ * Fails closed when the pane's conversation can't be read.
+ */
+export async function checkTargetSession(
+  tty: string,
+  expected: string,
+  probe: (tty: string) => Promise<string | null> = paneSessionId,
+): Promise<string | null> {
+  const actual = await probe(tty)
+  if (actual === null) return "can't confirm which conversation that pane is running — not sent"
+  if (actual !== expected) return 'that pane is running a different conversation now — not sent'
+  return null
+}
+
+async function paneSessionId(tty: string): Promise<string | null> {
+  const proc = await agentProcessForTty(tty)
+  if (!proc) return null
+  return (await probeAgentIdentity(proc.kind, proc.pid)).sessionId
+}
+
 async function executeAction(
   backend: Backend,
   action: HqAction,
@@ -258,6 +284,11 @@ async function executeAction(
   const pane = panes.find((p) => p.id === action.paneId)
   if (!pane) return { status: 'failed', outcome: 'pane no longer exists' }
   const occ = await occupantForTty(pane.tty)
+
+  if (action.sessionId && ['send', 'approve', 'reject', 'answer'].includes(action.kind)) {
+    const wrong = await checkTargetSession(pane.tty, action.sessionId)
+    if (wrong) return { status: 'stale', outcome: wrong }
+  }
 
   if (action.kind === 'approve' || action.kind === 'reject') {
     // Verify the SAME prompt is still on screen before touching the pane —
