@@ -142,6 +142,7 @@ Messages you type in HQ reach agents as `from=hq` (you); messages the Conductor 
 - Never targets its own pane, never auto-answers a dialog unless you opted in
 - After a timeout it tells the caller to `check`, never to re-send
 - Remote approvals are per-prompt fingerprint-verified; the bridge connects outbound only and holds no inbound port
+- HQ messages, approvals and answers are addressed to a conversation, not just a pane: a pane running an identifiable conversation (Claude, Codex or Devin) only accepts actions naming exactly that one — anything else is refused, never typed
 - Restore never guesses: an agent whose conversation can't be identified is skipped, never resumed into the wrong one; prompts are never replayed; the background snapshotter never launches iTerm2
 - Remote commands need consent on the Mac itself, not just in HQ; spawned agents get no flags; HQ messages are only typed into panes running an agent
 

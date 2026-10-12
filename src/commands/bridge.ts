@@ -310,15 +310,33 @@ export async function executeExec(
  * one folder, a /clear, a restart), typing would hit the wrong agent.
  * Fails closed when the pane's conversation can't be read.
  */
+export const NO_TARGET_CONVERSATION = 'message has no target conversation — not sent'
+
 export async function checkTargetSession(
   tty: string,
-  expected: string,
+  expected: string | null | undefined,
   probe: (tty: string) => Promise<string | null> = paneSessionId,
 ): Promise<string | null> {
   const actual = await probe(tty)
+  // No target named: only acceptable where there is nothing to name — a pane
+  // whose conversation can't be identified (brand new, screen-only agents).
+  // A pane running an identifiable conversation only takes actions addressed
+  // to exactly that conversation.
+  if (!expected) return actual === null ? null : NO_TARGET_CONVERSATION
   if (actual === null) return "can't confirm which conversation that pane is running — not sent"
   if (actual !== expected) return 'that pane is running a different conversation now — not sent'
   return null
+}
+
+/** Actions that type into an agent's conversation must name it (see checkTargetSession). */
+export async function targetSessionGate(
+  action: Pick<HqAction, 'kind' | 'sessionId'>,
+  tty: string,
+  probe: (tty: string) => Promise<string | null> = paneSessionId,
+): Promise<{ status: 'stale'; outcome: string } | null> {
+  if (!['send', 'approve', 'reject', 'answer'].includes(action.kind)) return null
+  const wrong = await checkTargetSession(tty, action.sessionId, probe)
+  return wrong ? { status: 'stale', outcome: wrong } : null
 }
 
 async function paneSessionId(tty: string): Promise<string | null> {
@@ -354,10 +372,8 @@ async function executeAction(
   if (!pane) return { status: 'failed', outcome: 'pane no longer exists' }
   const occ = await occupantForPane(pane)
 
-  if (action.sessionId && ['send', 'approve', 'reject', 'answer'].includes(action.kind)) {
-    const wrong = await checkTargetSession(pane.tty, action.sessionId)
-    if (wrong) return { status: 'stale', outcome: wrong }
-  }
+  const wrong = await targetSessionGate(action, pane.tty)
+  if (wrong) return wrong
 
   if (action.kind === 'approve' || action.kind === 'reject') {
     // Verify the SAME prompt is still on screen before touching the pane —
