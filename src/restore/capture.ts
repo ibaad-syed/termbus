@@ -119,7 +119,7 @@ export async function captureState(
       })
       continue
     }
-    const id = await probeAgentIdentity(proc.kind, proc.pid)
+    const id = await probeAgentIdentity(proc.kind, proc.pid, { paneTitle: p.title })
     layout.push({
       windowIndex: p.windowIndex,
       tabIndex: p.tabIndex,
@@ -150,13 +150,13 @@ export async function captureState(
 
 /** `ps -axo pid=,tty=,command=` → interactive agent processes (on a tty) of
  *  every agent type restore can resume; helpers like `devin acp` excluded. */
-export function agentProcessesFromPs(psOutput: string): Array<{ pid: number; kind: AgentKind }> {
-  const out: Array<{ pid: number; kind: AgentKind }> = []
+export function agentProcessesFromPs(psOutput: string): Array<{ pid: number; kind: AgentKind; tty: string }> {
+  const out: Array<{ pid: number; kind: AgentKind; tty: string }> = []
   for (const line of psOutput.split('\n')) {
     const m = line.trim().match(/^(\d+)\s+(\S+)\s+(.*)$/)
     if (!m || m[2] === '??' || m[2] === '-') continue
     const def = agentForCommand(m[3])
-    if (def?.resume) out.push({ pid: Number(m[1]), kind: def.id })
+    if (def?.resume) out.push({ pid: Number(m[1]), kind: def.id, tty: m[2] })
   }
   return out
 }
@@ -174,11 +174,16 @@ export interface LiveAgents {
  * throws if processes cannot be listed, and reports agents it could not
  * identify instead of leaving them out.
  */
-export async function liveAgents(): Promise<LiveAgents> {
-  const { stdout } = await execFileP('ps', ['-axo', 'pid=,tty=,command='], { maxBuffer: 16 * 1024 * 1024 })
+export async function liveAgents(opts: { paneTitles?: Map<string, string> } = {}): Promise<LiveAgents> {
+  // only this user's processes: another macOS account's agents are not ours to
+  // restore, and one of them (unidentifiable from here) used to block every restore
+  const uid = typeof process.getuid === 'function' ? String(process.getuid()) : null
+  const args = uid ? ['-U', uid, '-o', 'pid=,tty=,command='] : ['-axo', 'pid=,tty=,command=']
+  const { stdout } = await execFileP('ps', args, { maxBuffer: 16 * 1024 * 1024 })
   const live: LiveAgents = { ids: new Set(), uncertain: [] }
   for (const p of agentProcessesFromPs(stdout)) {
-    const id = await probeAgentIdentity(p.kind, p.pid)
+    const paneTitle = p.tty ? opts.paneTitles?.get(p.tty.replace(/^\/dev\//, '')) : undefined
+    const id = await probeAgentIdentity(p.kind, p.pid, { paneTitle })
     if (id.sessionId) live.ids.add(id.sessionId)
     else live.uncertain.push({ kind: p.kind, cwd: id.cwd })
   }

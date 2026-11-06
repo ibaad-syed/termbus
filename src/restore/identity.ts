@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { readdirSync } from 'node:fs'
 import { open, readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -105,6 +106,51 @@ async function codexOpenRollouts(pid: number): Promise<Array<{ mtimeMs: number; 
   return out
 }
 
+/**
+ * Codex 0.16x runs conversations in its app-server daemon, so the TUI holds no
+ * rollout file to read. The TUI names its pane "<thread name> | <folder> (codex)",
+ * and Codex's state database has each thread's name and cwd: an exact name,
+ * not archived, in the same folder, is the conversation (most recent if two).
+ */
+export function codexThreadNamesFromTitle(title: string): string[] {
+  const t = title.replace(/^[\s\u2800-\u28ff\u2500-\u25ff\u2700-\u27bf✳*]+/u, '').trim()
+  // drop the trailing "<folder> (codex)"; Codex may prefix a status ("[ ! ] Action Required | …"),
+  // so every tail of what is left is a candidate name, longest first
+  const parts = t.split(' | ').slice(0, -1)
+  const out: string[] = []
+  for (let i = 0; i < parts.length; i++) out.push(parts.slice(i).join(' | ').trim())
+  return out.filter(Boolean)
+}
+
+export function codexStateDb(home: string = homedir()): string | null {
+  try {
+    const files = readdirSync(join(home, '.codex')).filter((f) => /^state_\d+\.sqlite$/.test(f))
+    files.sort((a, b) => Number(b.match(/\d+/)![0]) - Number(a.match(/\d+/)![0]))
+    return files[0] ? join(home, '.codex', files[0]) : null
+  } catch {
+    return null
+  }
+}
+
+async function codexThreadByTitle(title: string, cwd: string | null, db: string | null): Promise<{ sessionId: string; cwd: string | null } | null> {
+  const names = codexThreadNamesFromTitle(title)
+  if (names.length === 0 || !db) return null
+  const list = names.map((n) => `'${n.replace(/'/g, "''")}'`).join(', ')
+  try {
+    const { stdout } = await execFileP(
+      'sqlite3',
+      ['-readonly', '-json', db, `select id, cwd from threads where archived = 0 and (name in (${list}) or title in (${list})) order by updated_at_ms desc limit 5`],
+      { timeout: 5000 },
+    )
+    const rows = (stdout.trim() ? JSON.parse(stdout) : []) as Array<{ id: string; cwd: string | null }>
+    const here = cwd ? rows.filter((r) => r.cwd === cwd) : rows
+    const pick = here[0] ?? (cwd ? null : rows[0])
+    return pick ? { sessionId: pick.id, cwd: pick.cwd } : null
+  } catch {
+    return null
+  }
+}
+
 export interface AgentIdentity {
   sessionId: string | null
   cwd: string | null
@@ -114,7 +160,7 @@ export interface AgentIdentity {
 export async function probeAgentIdentity(
   kind: AgentKind,
   pid: number,
-  opts: { claudeSessionsDir?: string; devinRoot?: string } = {},
+  opts: { claudeSessionsDir?: string; devinRoot?: string; paneTitle?: string; codexDb?: string | null } = {},
 ): Promise<AgentIdentity> {
   const cwd = await processCwd(pid)
   let found: { sessionId: string; cwd: string | null } | null = null
@@ -145,6 +191,7 @@ export async function probeAgentIdentity(
     }
   } else if (kind === 'codex') {
     found = codexMainThread(await codexOpenRollouts(pid))
+    if (!found && opts.paneTitle) found = await codexThreadByTitle(opts.paneTitle, cwd, opts.codexDb === undefined ? codexStateDb() : opts.codexDb)
   }
   return {
     // Only the CURRENT identity counts: the id on the command line is where the

@@ -409,7 +409,8 @@ export class AppleScriptBackend implements Backend {
   }
 
   async listPanesIfRunning(): Promise<Pane[] | null> {
-    const raw = await osascript(LIST_IF_RUNNING_SCRIPT, [])
+    // background snapshots walk every tab while panes open and close: retry a walk that lost its place
+    const raw = await osascriptRetrying(LIST_IF_RUNNING_SCRIPT, [])
     return raw === 'NOT_RUNNING' ? null : parseListOutput(raw, this.selfSessionId)
   }
 
@@ -447,7 +448,7 @@ export class AppleScriptBackend implements Backend {
   }
 
   async tabTitles(): Promise<Array<{ windowIndex: number; tabIndex: number; title: string }> | null> {
-    const raw = await osascript(TAB_TITLES_SCRIPT, [])
+    const raw = await osascriptRetrying(TAB_TITLES_SCRIPT, [])
     return raw.trim() === 'NOT_RUNNING' ? null : parseTabTitlesOutput(raw)
   }
 
@@ -456,7 +457,7 @@ export class AppleScriptBackend implements Backend {
   }
 
   async paneGeometry(): Promise<Map<string, PaneGeometry> | null> {
-    const raw = await osascript(GEOMETRY_SCRIPT, [])
+    const raw = await osascriptRetrying(GEOMETRY_SCRIPT, [])
     return raw === 'NOT_RUNNING' ? null : parseGeometryOutput(raw)
   }
 }

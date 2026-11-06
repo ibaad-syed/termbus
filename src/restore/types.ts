@@ -51,6 +51,8 @@ export interface Generation {
   agents: SavedAgent[]
   /** absent in snapshots taken before layout capture existed */
   layout?: SavedPane[]
+  /** set by `termbus snapshot --pin [name]`: never pruned, restorable by name */
+  pinned?: string
   /** named tabs only; absent in snapshots taken before tab names were saved */
   tabs?: SavedTab[]
 }

@@ -53,3 +53,36 @@ describe('tab names', () => {
     expect(s.generations[1].tabs?.[0].title).toBe('AUDITOR')
   })
 })
+
+describe('codex pane titles', () => {
+  it('reads the thread name from the pane title the Codex TUI sets', async () => {
+    const { codexThreadNamesFromTitle } = await import('../src/restore/identity.js')
+    expect(codexThreadNamesFromTitle('Analyze Cutdown exposure pipeline | Ponder (codex)')).toEqual(['Analyze Cutdown exposure pipeline'])
+    expect(codexThreadNamesFromTitle('⠧ Analyze Cutdown exposure pipeline | Ponder (codex)')).toEqual(['Analyze Cutdown exposure pipeline'])
+    expect(codexThreadNamesFromTitle('[ ! ] Action Required | Analyze Cutdown exposure pipeline | Ponder (codex)')).toContain(
+      'Analyze Cutdown exposure pipeline',
+    )
+    expect(codexThreadNamesFromTitle('codex')).toEqual([])
+  })
+})
+
+describe('retention and pins', () => {
+  it('keeps the state an earlier run ended in, however many states the current run records', async () => {
+    const { emptyStore, recordGeneration, pickGeneration, STABLE_MS } = await import('../src/restore/store.js')
+    let s = emptyStore()
+    s = recordGeneration(s, { instance: 'A', agents: [agent({ sessionId: 'before-crash' })], now: 0 })
+    s = recordGeneration(s, { instance: 'A', agents: [agent({ sessionId: 'before-crash' })], now: STABLE_MS })
+    for (let i = 0; i < 80; i++) s = recordGeneration(s, { instance: 'B', agents: [agent({ sessionId: `b${i}` })], now: 2 * STABLE_MS + i }, 50)
+    expect(s.generations.length).toBe(51)
+    expect(pickGeneration(s, 'B')?.agents[0].sessionId).toBe('before-crash')
+  })
+
+  it('never prunes a pinned state', async () => {
+    const { emptyStore, recordGeneration } = await import('../src/restore/store.js')
+    let s = emptyStore()
+    s = recordGeneration(s, { instance: 'A', agents: [agent({ sessionId: 'pinned' })], now: 0 })
+    s = { ...s, generations: s.generations.map((g) => ({ ...g, pinned: 'keep' })) }
+    for (let i = 0; i < 80; i++) s = recordGeneration(s, { instance: 'A', agents: [agent({ sessionId: `a${i}` })], now: 1 + i }, 50)
+    expect(s.generations.some((g) => g.pinned === 'keep')).toBe(true)
+  })
+})

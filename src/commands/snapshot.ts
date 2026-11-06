@@ -14,9 +14,10 @@ import type { LiveAgents } from '../restore/capture.js'
 const execFileP = promisify(execFile)
 const LABEL = SNAPSHOT_LABEL
 const USAGE =
-  'usage: termbus snapshot [--watch] [--interval S] [--install|--uninstall]\n' +
+  'usage: termbus snapshot [--pin NAME] [--watch] [--interval S] [--install|--uninstall]\n' +
   'Remembers which agent panes are open and which conversation each runs,\n' +
   'so `termbus restore` can bring them back after a restart.\n' +
+  '  --pin NAME   save now and keep this state forever under NAME (`termbus restore NAME`)\n' +
   '  --watch      keep snapshotting every --interval seconds (default 15)\n' +
   '  --install    run --watch in the background at login (launchd)\n' +
   '  --uninstall  remove the background service and keep it off\n' +
@@ -73,6 +74,7 @@ export async function cmdSnapshot(argv: string[]): Promise<void> {
       watch: { type: 'boolean' },
       interval: { type: 'string' },
       install: { type: 'boolean' },
+      pin: { type: 'string' },
       uninstall: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
@@ -101,6 +103,20 @@ export async function cmdSnapshot(argv: string[]): Promise<void> {
   if (!values.watch) {
     const n = await takeSnapshot(false)
     if (n === null) throw new TermbusError('iTerm2 is not running — nothing to snapshot')
+    if (values.pin !== undefined) {
+      const name = values.pin.trim()
+      if (!name || /^\d+$/.test(name)) throw new TermbusError('--pin needs a name that is not just a number')
+      const path = snapshotFile()
+      const store = loadStore(path)
+      const last = store.generations[store.generations.length - 1]
+      // a name is one snapshot: pinning it again moves it to the current state
+      saveStore(path, {
+        ...store,
+        generations: store.generations.map((g) => (g === last ? { ...g, pinned: name } : g.pinned === name ? { ...g, pinned: undefined } : g)),
+      })
+      console.log(`saved ${n} agent pane${n === 1 ? '' : 's'} as 📌 ${name} (snapshot ${last.id}); bring it back with: termbus restore ${name}`)
+      return
+    }
     console.log(`saved ${n} agent pane${n === 1 ? '' : 's'} → ${snapshotFile()}`)
     return
   }
@@ -109,7 +125,7 @@ export async function cmdSnapshot(argv: string[]): Promise<void> {
     try {
       await takeSnapshot(true)
     } catch (err) {
-      console.error(`snapshot failed: ${err instanceof Error ? err.message : String(err)}`)
+      console.error(`${new Date().toISOString()} snapshot failed: ${err instanceof Error ? err.message : String(err)}`)
     }
     await defaultClock.sleep(interval * 1000)
   }

@@ -218,13 +218,20 @@ describe('snapshot store', () => {
     expect(pickGeneration(s, 'B')?.agents.map((a) => a.sessionId)).toEqual(['a1', 'a2'])
   })
 
-  it('everything closed on purpose (empty state persisted) → nothing to restore', () => {
+  it('a run that ended with no agents (crash, logout) → its last state that had agents', () => {
     let s = emptyStore()
     s = recordGeneration(s, { instance: 'A', agents: [agent({ sessionId: 'a1' })], now: 0 })
     s = recordGeneration(s, { instance: 'A', agents: [agent({ sessionId: 'a1' })], now: STABLE_MS })
     s = recordGeneration(s, { instance: 'A', agents: [], now: STABLE_MS + 1000 })
     s = recordGeneration(s, { instance: 'A', agents: [], now: 3 * STABLE_MS })
     s = recordGeneration(s, { instance: 'B', agents: [], now: 4 * STABLE_MS })
+    expect(pickGeneration(s, 'B')?.agents[0].sessionId).toBe('a1')
+  })
+
+  it('a run that never had agents → nothing to restore', () => {
+    let s = emptyStore()
+    s = recordGeneration(s, { instance: 'A', agents: [], now: 0 })
+    s = recordGeneration(s, { instance: 'B', agents: [], now: STABLE_MS })
     expect(pickGeneration(s, 'B')).toBeNull()
   })
 
@@ -319,9 +326,9 @@ describe('agentProcessesFromPs', () => {
  34589 ttys003  npm exec mcp-remote https://mcp.linear.app/mcp
  99999 ttys004  /opt/homebrew/bin/codex`
     expect(agentProcessesFromPs(ps)).toEqual([
-      { pid: 7152, kind: 'claude' },
-      { pid: 80463, kind: 'codex' },
-      { pid: 99999, kind: 'codex' },
+      { pid: 7152, kind: 'claude', tty: 'ttys003' },
+      { pid: 80463, kind: 'codex', tty: 'ttys002' },
+      { pid: 99999, kind: 'codex', tty: 'ttys004' },
     ])
   })
 })

@@ -52,7 +52,43 @@ export function recordGeneration(
     ...(snap.layout ? { layout: snap.layout } : {}),
     ...(snap.tabs ? { tabs: snap.tabs } : {}),
   }
-  return { v: 1, nextId: store.nextId + 1, generations: [...store.generations, gen].slice(-max) }
+  return { v: 1, nextId: store.nextId + 1, generations: prune([...store.generations, gen], max) }
+}
+
+/** Earlier terminal runs whose last good state is always kept, however busy the current run is. */
+export const KEEP_EARLIER_RUNS = 5
+
+/**
+ * Keep the newest `max` generations, plus every pinned one, plus the state each
+ * of the last few earlier terminal runs ended in. Counting alone used to prune
+ * the snapshot from before a crash: a new run records dozens of states an hour.
+ */
+export function prune(gens: Generation[], max = DEFAULT_MAX_GENERATIONS): Generation[] {
+  if (gens.length <= max) return gens
+  const keep = new Set<number>(gens.slice(-max).map((g) => g.id))
+  for (const g of gens) if (g.pinned) keep.add(g.id)
+  const current = gens[gens.length - 1].instance
+  const seen: Array<string | null> = []
+  for (let i = gens.length - 1; i >= 0 && seen.length < KEEP_EARLIER_RUNS; i--) {
+    const inst = gens[i].instance
+    if (inst === current || seen.includes(inst)) continue
+    seen.push(inst)
+    const pick = pickFromInstance(gens, i)
+    if (pick) keep.add(pick.id)
+  }
+  return gens.filter((g) => keep.has(g.id))
+}
+
+/** The state to restore from the instance whose newest generation is gens[i]: its last stable state with agents. */
+function pickFromInstance(gens: Generation[], i: number): Generation | null {
+  const instance = gens[i].instance
+  let lastWithAgents: Generation | null = null
+  for (let j = i; j >= 0 && gens[j].instance === instance; j--) {
+    if (gens[j].agents.length === 0) continue
+    lastWithAgents ??= gens[j]
+    if (stable(gens[j])) return gens[j]
+  }
+  return lastWithAgents
 }
 
 /**
@@ -63,13 +99,12 @@ export function recordGeneration(
  */
 export const STABLE_MS = 45_000
 
-const stable = (g: Generation) => g.lastSeenAt - g.takenAt >= STABLE_MS
+export const stable = (g: Generation) => g.lastSeenAt - g.takenAt >= STABLE_MS
 
 /**
- * What `restore` brings back by default: the last STABLE state of the most
- * recent terminal instance other than the running one (its last state if
- * none was stable). If that state had no agents — everything was closed on
- * purpose — there is nothing to restore; never reach further back silently.
+ * What `restore` brings back by default: the last STABLE state with agents of
+ * the most recent terminal instance other than the running one (its last state
+ * with agents if none was stable). Never reaches into an older instance.
  */
 export function pickGeneration(store: SnapshotStore, currentInstance: string | null): Generation | null {
   const gens = store.generations
@@ -78,15 +113,10 @@ export function pickGeneration(store: SnapshotStore, currentInstance: string | n
     while (i >= 0 && gens[i].instance === currentInstance) i--
   }
   if (i < 0) return null
-  const instance = gens[i].instance
-  let pick: Generation = gens[i]
-  for (let j = i; j >= 0 && gens[j].instance === instance; j--) {
-    if (stable(gens[j])) {
-      pick = gens[j]
-      break
-    }
-  }
-  return pick.agents.length > 0 ? pick : null
+  // A run that ended with no agents usually lost them all at once (a crash, a
+  // logout) rather than closing them one by one on purpose: restore its last
+  // state that had agents. `restore` says which state it picked and when.
+  return pickFromInstance(gens, i)
 }
 
 export function loadStore(path: string): SnapshotStore {

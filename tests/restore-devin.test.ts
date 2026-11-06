@@ -47,8 +47,8 @@ describe('restore and the registry', () => {
  42698 ttys006  /Users/u/.local/bin/devin acp
   7152 ttys003  claude --resume abc`
     expect(agentProcessesFromPs(ps)).toEqual([
-      { pid: 11405, kind: 'devin' },
-      { pid: 7152, kind: 'claude' },
+      { pid: 11405, kind: 'devin', tty: 'ttys006' },
+      { pid: 7152, kind: 'claude', tty: 'ttys003' },
     ])
   })
 

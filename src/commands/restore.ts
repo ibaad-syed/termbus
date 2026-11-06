@@ -16,13 +16,16 @@ import { loadStore, pickGeneration } from '../restore/store.js'
 import type { Generation, SavedAgent } from '../restore/types.js'
 
 const USAGE =
-  'usage: termbus restore [--dry-run] [--list] [--generation N]\n' +
+  'usage: termbus restore [N | --generation N|name] [--dry-run] [--list] [--force]\n' +
   'Reopens the agent panes that were open before iTerm2 quit or the Mac\n' +
   'restarted, each resuming its own conversation. Agents already running are\n' +
   'skipped, so running it twice is harmless.\n' +
   '  --dry-run       show what would open, change nothing\n' +
   '  --list          list saved snapshots\n' +
-  '  --generation N  restore a specific snapshot from --list'
+  '  --generation N  restore a specific snapshot from --list (or just `termbus restore N`);\n' +
+  '                  a pinned snapshot can be named instead (`termbus snapshot --pin <name>`)\n' +
+  '  --force         also open agents skipped as "possibly running" (an agent running here\n' +
+  '                  could not be identified); agents known to be running are still skipped'
 
 const when = (ms: number) => new Date(ms).toLocaleString()
 
@@ -37,7 +40,7 @@ function printList(gens: Generation[], current: string | null): void {
   console.log('GEN   SAVED                    AGENTS  ITERM RUN')
   for (const g of [...gens].reverse()) {
     const run = g.instance === current ? 'current' : 'earlier'
-    console.log(`${String(g.id).padEnd(5)} ${when(g.lastSeenAt).padEnd(24)} ${String(g.agents.length).padEnd(7)} ${run}`)
+    console.log(`${String(g.id).padEnd(5)} ${when(g.lastSeenAt).padEnd(24)} ${String(g.agents.length).padEnd(7)} ${run}${g.pinned ? `  📌 ${g.pinned}` : ''}`)
   }
 }
 
@@ -86,11 +89,13 @@ export function acquireLock(path: string, pid = process.pid): () => void {
 }
 
 export async function cmdRestore(argv: string[]): Promise<void> {
-  const { values } = parseArgs({
+  const { values, positionals } = parseArgs({
     args: argv,
+    allowPositionals: true,
     options: {
       'dry-run': { type: 'boolean' },
       list: { type: 'boolean' },
+      force: { type: 'boolean' },
       generation: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
     },
@@ -103,10 +108,15 @@ export async function cmdRestore(argv: string[]): Promise<void> {
   const instance = await terminalInstance()
   if (values.list) return printList(store.generations, instance)
 
+  if (positionals.length > 1) throw new TermbusError(USAGE)
+  const wanted = values.generation ?? positionals[0]
   let gen: Generation | null
-  if (values.generation) {
-    gen = store.generations.find((g) => g.id === Number(values.generation)) ?? null
-    if (!gen) throw new TermbusError(`no snapshot ${values.generation} — see \`termbus restore --list\``)
+  if (wanted) {
+    gen =
+      store.generations.find((g) => String(g.id) === wanted) ??
+      [...store.generations].reverse().find((g) => g.pinned === wanted) ??
+      null
+    if (!gen) throw new TermbusError(`no snapshot ${wanted} — see \`termbus restore --list\``)
   } else {
     gen = pickGeneration(store, instance)
     if (!gen) {
@@ -118,21 +128,33 @@ export async function cmdRestore(argv: string[]): Promise<void> {
     }
   }
 
+  if (!wanted && gen.agents.length > 0) {
+    const lastOfRun = [...store.generations].reverse().find((g) => g.instance === gen!.instance)
+    if (lastOfRun && lastOfRun.agents.length === 0) {
+      console.log(`that iTerm2 run ended with no agents open (a crash or logout?); using its last state that had them`)
+    }
+  }
   const backend = detectBackend()
   const release = values['dry-run'] ? () => {} : acquireLock(join(dirname(snapshotFile()), 'restore.lock'))
   try {
-    await runRestore(backend, gen, !!values['dry-run'])
+    await runRestore(backend, gen, !!values['dry-run'], !!values.force)
   } finally {
     release()
   }
 }
 
-async function runRestore(backend: Backend, gen: Generation, dryRun: boolean): Promise<void> {
-  // live = running anywhere on this Mac, found by process, not by pane list
-  const live = await liveAgents()
-  const plan = planRestore(gen, live.ids, live.uncertain)
+async function runRestore(backend: Backend, gen: Generation, dryRun: boolean, force: boolean): Promise<void> {
+  // live = running anywhere on this Mac, found by process, not by pane list; pane
+  // titles (when iTerm2 is up) identify Codex conversations
+  const panes = backend.listPanesIfRunning ? await backend.listPanesIfRunning().catch(() => null) : null
+  const paneTitles = new Map((panes ?? []).map((p) => [p.tty.replace(/^\/dev\//, ''), p.title]))
+  const live = await liveAgents({ paneTitles })
+  const plan = planRestore(gen, live.ids, force ? [] : live.uncertain)
 
-  console.log(`snapshot ${gen.id} from ${when(gen.lastSeenAt)}:`)
+  console.log(`snapshot ${gen.id}${gen.pinned ? ` (📌 ${gen.pinned})` : ''} from ${when(gen.lastSeenAt)}:`)
+  if (!force && plan.skipped.some((s) => s.reason.startsWith('possibly running'))) {
+    console.log('  (an agent running here could not be identified; --force opens these anyway)')
+  }
   for (const s of plan.skipped) console.log(`  skip   ${describe(s.agent)}  (${s.reason})`)
   const lines = new Map<SavedAgent, string>()
   for (const a of plan.windows.flat(2)) {

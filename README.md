@@ -87,11 +87,13 @@ termbus restore             # reopen it
 ```
 
 - **Every agent resumes its own conversation** — Claude Code, Codex and Devin, in the directory it ran in, with its permission flags (`--dangerously-skip-permissions`, `--yolo`, model…) when they can be read unambiguously.
-- **Your layout comes back** — windows, tabs, and each tab's split arrangement (side by side, stacked, nested). Shells and dev-server panes reopen as shells in their directory; their commands are not re-run.
+- **Your layout comes back** — windows, tabs (with the names you gave them), and each tab's split arrangement (side by side, stacked, nested). Shells and dev-server panes reopen as shells in their directory; their commands are not re-run.
 - **Nothing is duplicated** — agents still running anywhere are skipped, so running `restore` twice is harmless.
-- **It's automatic.** The first time you run termbus, it starts remembering in the background (a small launchd service; turn off with `termbus snapshot --uninstall`). After a restart you get a notification telling you how many agents can come back. `termbus restore --list` shows saved snapshots; `--generation N` restores an older one.
+- **It's automatic.** The first time you run termbus, it starts remembering in the background (a small launchd service; turn off with `termbus snapshot --uninstall`). After a restart you get a notification telling you how many agents can come back. `termbus restore --list` shows saved snapshots; `termbus restore N` restores an older one.
+- **Save a state yourself and keep it.** `termbus snapshot --pin <name>` saves now and never prunes it; `termbus restore <name>` brings it back. The state each earlier iTerm2 run ended in is kept too, however busy the current run is.
+- **Override.** If an agent running here can't be identified, restore skips the saved ones it might be and says so; `termbus restore --force` opens them anyway (agents known to be running are still skipped). Only your own macOS account's processes count.
 
-Under the hood: Claude Code's session is read from its per-process session file, Codex's from the session log it holds open, Devin's from the session lock its `devin acp` process holds; pane sizes reveal each tab's split tree. Nothing is ever typed into a pane — each restored pane launches its own resume command.
+Under the hood: Claude Code's session is read from its per-process session file, Codex's from the session log it holds open (or, for Codex's app-server daemon, from the thread its pane is named after), Devin's from the session lock its `devin acp` process holds; pane sizes reveal each tab's split tree. Nothing is ever typed into a pane — each restored pane launches its own resume command.
 
 ## How it works
 
