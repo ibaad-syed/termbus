@@ -30,6 +30,13 @@ export interface SavedPane {
   cwd: string | null
 }
 
+/** A tab's own name (iTerm2's "Edit Tab Title"), when the user gave it one. */
+export interface SavedTab {
+  windowIndex: number
+  tabIndex: number
+  title: string
+}
+
 /**
  * A distinct state of the terminal's agent panes. Consecutive identical states
  * share one generation (only lastSeenAt moves). `instance` identifies one run
@@ -44,6 +51,8 @@ export interface Generation {
   agents: SavedAgent[]
   /** absent in snapshots taken before layout capture existed */
   layout?: SavedPane[]
+  /** named tabs only; absent in snapshots taken before tab names were saved */
+  tabs?: SavedTab[]
 }
 
 export interface SnapshotStore {

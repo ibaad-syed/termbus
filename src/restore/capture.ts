@@ -7,7 +7,7 @@ import { loadMarks } from '../core/marks.js'
 import { agentProcessForTty, occupantForPane } from '../core/occupant.js'
 import type { AgentKind, Backend } from '../core/types.js'
 import { probeAgentIdentity } from './identity.js'
-import type { SavedAgent, SavedPane } from './types.js'
+import type { SavedAgent, SavedPane, SavedTab } from './types.js'
 
 const execFileP = promisify(execFile)
 
@@ -68,10 +68,14 @@ export async function captureAgents(backend: Backend): Promise<SavedAgent[] | nu
 }
 
 /** Agents plus the full pane layout (shells included). */
-export async function captureState(backend: Backend): Promise<{ agents: SavedAgent[]; layout: SavedPane[] } | null> {
+export async function captureState(
+  backend: Backend,
+): Promise<{ agents: SavedAgent[]; layout: SavedPane[]; tabs?: SavedTab[] } | null> {
   const panes = backend.listPanesIfRunning ? await backend.listPanesIfRunning() : await backend.listPanes()
   if (!panes) return null
   const geometry = backend.paneGeometry ? await backend.paneGeometry().catch(() => null) : null
+  // a failed read leaves tab names out of this snapshot (the last saved ones stay) rather than saving none
+  const tabs = backend.tabTitles ? ((await backend.tabTitles().catch(() => null)) ?? undefined) : undefined
   const out: SavedAgent[] = []
   const layout: SavedPane[] = []
   const marks = loadMarks()
@@ -141,7 +145,7 @@ export async function captureState(backend: Backend): Promise<{ agents: SavedAge
       command: proc.command,
     })
   }
-  return { agents: out, layout }
+  return { agents: out, layout, ...(tabs ? { tabs } : {}) }
 }
 
 /** `ps -axo pid=,tty=,command=` → interactive agent processes (on a tty) of

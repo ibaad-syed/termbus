@@ -145,12 +145,15 @@ async function runRestore(backend: Backend, gen: Generation, dryRun: boolean): P
     console.log('nothing to open')
     return
   }
-  const tabs = plan.windows.map((win) => win.map((tab) => tabLayout(gen.layout, tab)))
+  const tabName = (saved: SavedAgent) => gen.tabs?.find((t) => t.windowIndex === saved.windowIndex && t.tabIndex === saved.tabIndex)?.title ?? null
+  const tabs = plan.windows.map((win) => win.map((tab) => ({ ...tabLayout(gen.layout, tab), name: tabName(tab[0]) })))
   const leafLabel = (spec: LeafSpec) =>
     spec.agent ? `${spec.agent.kind} ${spec.agent.sessionId!.slice(0, 8)}` : `shell ${spec.cwd.split('/').pop()}`
   tabs.forEach((win, wi) =>
     win.forEach((tab, ti) =>
-      console.log(`  window ${wi + 1} tab ${ti + 1}: ${describeTree(tab.tree, (i) => leafLabel(tab.leaves.get(i)!))}`),
+      console.log(
+        `  window ${wi + 1} tab ${ti + 1}${tab.name ? ` "${tab.name}"` : ''}: ${describeTree(tab.tree, (i) => leafLabel(tab.leaves.get(i)!))}`,
+      ),
     ),
   )
   if (dryRun) return
@@ -185,18 +188,26 @@ async function runRestore(backend: Backend, gen: Generation, dryRun: boolean): P
     await build(tree.a, pane, leaves)
     await build(tree.b, created, leaves)
   }
+  const names: Array<{ paneId: string; title: string }> = []
   for (const win of tabs) {
     let anchor: string | null = null // a pane in this window, for new tabs
-    for (const { tree, leaves } of win) {
+    for (const { tree, leaves, name } of win) {
       const rootSpec = leaves.get(firstLeaf(tree))!
       const opts = optsFor(rootSpec)
       const root: string = anchor ? await backend.createTab(anchor, opts) : await backend.createWindow(opts)
       placed(rootSpec, root)
+      if (name) names.push({ paneId: root, title: name })
       anchor ??= root
       await build(tree, root, leaves)
     }
   }
   console.log(`reopened ${opened.length} agent pane${opened.length === 1 ? '' : 's'}`)
+  if (names.length > 0) {
+    const failed = new Set(backend.setTabTitles ? await backend.setTabTitles(names) : names.map((n) => n.paneId))
+    const unnamed = names.filter((n) => failed.has(n.paneId)).map((n) => `"${n.title}"`)
+    if (unnamed.length > 0) console.error(`could not name ${unnamed.length} tab${unnamed.length === 1 ? '' : 's'} (iTerm2 Python API unavailable): ${unnamed.join(', ')}`)
+    else console.log(`named ${names.length} tab${names.length === 1 ? '' : 's'}`)
+  }
   if (remap.size > 0) {
     updateOrg((org) => remapMembers(org, remap))
     updateMarks((marks) => remapMarks(marks, remap))

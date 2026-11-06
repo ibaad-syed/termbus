@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { TermbusError } from '../core/errors.js'
 import type { Backend, CreatePaneOptions, Pane } from '../core/types.js'
+import { setTabTitlesViaPython } from './iterm-python.js'
 
 const execFileP = promisify(execFile)
 
@@ -251,6 +252,47 @@ on run argv
 end run
 `
 
+// Tabs the user named (Edit Tab Title), by position. An unnamed tab has an empty
+// override and is left out. Never launches iTerm2.
+const TAB_TITLES_SCRIPT = `
+on run argv
+  if application "iTerm2" is not running then return "NOT_RUNNING"
+  set fieldSep to character id 31
+  set recSep to character id 30
+  set out to ""
+  tell application "iTerm2"
+    set wIdx to 0
+    repeat with w in windows
+      set wIdx to wIdx + 1
+      set tIdx to 0
+      repeat with t in tabs of w
+        set tIdx to tIdx + 1
+        set nm to ""
+        try
+          tell current session of t to set nm to (variable named "tab.titleOverride")
+        end try
+        if nm is missing value then set nm to ""
+        if nm is not "" then set out to out & wIdx & fieldSep & tIdx & fieldSep & nm & recSep
+      end repeat
+    end repeat
+  end tell
+  return out
+end run
+`
+
+export function parseTabTitlesOutput(raw: string): Array<{ windowIndex: number; tabIndex: number; title: string }> {
+  const out: Array<{ windowIndex: number; tabIndex: number; title: string }> = []
+  for (const rec of raw.split(RS)) {
+    const f = rec.split(FS)
+    if (f.length < 3) continue
+    const windowIndex = Number(f[0])
+    const tabIndex = Number(f[1])
+    const title = f.slice(2).join(FS).trim()
+    if (Number.isInteger(windowIndex) && Number.isInteger(tabIndex) && title) out.push({ windowIndex, tabIndex, title })
+  }
+  return out
+}
+
 export interface PaneGeometry {
   cols: number
   rows: number
@@ -402,6 +444,15 @@ export class AppleScriptBackend implements Backend {
 
   async splitPane(paneId: string, opts: CreatePaneOptions & { stacked?: boolean } = {}): Promise<string> {
     return osascript(SPLIT_SCRIPT, [opts.command ?? '', opts.profile ?? '', paneId, opts.stacked ? 'h' : 'v'])
+  }
+
+  async tabTitles(): Promise<Array<{ windowIndex: number; tabIndex: number; title: string }> | null> {
+    const raw = await osascript(TAB_TITLES_SCRIPT, [])
+    return raw.trim() === 'NOT_RUNNING' ? null : parseTabTitlesOutput(raw)
+  }
+
+  async setTabTitles(titles: Array<{ paneId: string; title: string }>): Promise<string[]> {
+    return setTabTitlesViaPython(titles)
   }
 
   async paneGeometry(): Promise<Map<string, PaneGeometry> | null> {

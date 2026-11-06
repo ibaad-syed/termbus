@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import type { Generation, SavedAgent, SavedPane, SnapshotStore } from './types.js'
+import type { Generation, SavedAgent, SavedPane, SavedTab, SnapshotStore } from './types.js'
 
 export const DEFAULT_MAX_GENERATIONS = 50
 
@@ -23,17 +23,23 @@ function sameAgents(a: SavedAgent[], b: SavedAgent[]): boolean {
 /** Record the current state. Pure: returns a new store. */
 export function recordGeneration(
   store: SnapshotStore,
-  snap: { instance: string | null; agents: SavedAgent[]; layout?: SavedPane[]; now: number },
+  snap: { instance: string | null; agents: SavedAgent[]; layout?: SavedPane[]; tabs?: SavedTab[]; now: number },
   max = DEFAULT_MAX_GENERATIONS,
 ): SnapshotStore {
   const last = store.generations[store.generations.length - 1]
   if (last && last.instance === snap.instance && sameAgents(last.agents, snap.agents)) {
     return {
       ...store,
-      // same state: refresh the timestamp and the (cosmetic) titles
+      // same state: refresh the timestamp and the (cosmetic) titles; renaming a tab is cosmetic too
       generations: [
         ...store.generations.slice(0, -1),
-        { ...last, lastSeenAt: snap.now, agents: snap.agents, ...(snap.layout ? { layout: snap.layout } : {}) },
+        {
+          ...last,
+          lastSeenAt: snap.now,
+          agents: snap.agents,
+          ...(snap.layout ? { layout: snap.layout } : {}),
+          ...(snap.tabs ? { tabs: snap.tabs } : {}),
+        },
       ],
     }
   }
@@ -44,6 +50,7 @@ export function recordGeneration(
     lastSeenAt: snap.now,
     agents: snap.agents,
     ...(snap.layout ? { layout: snap.layout } : {}),
+    ...(snap.tabs ? { tabs: snap.tabs } : {}),
   }
   return { v: 1, nextId: store.nextId + 1, generations: [...store.generations, gen].slice(-max) }
 }

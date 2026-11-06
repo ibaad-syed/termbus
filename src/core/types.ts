@@ -25,6 +25,10 @@ export interface Backend {
   splitPane?(paneId: string, opts?: CreatePaneOptions & { stacked?: boolean }): Promise<string>
   /** Optional: per-pane size/profile and window shape, for layout capture. */
   paneGeometry?(): Promise<Map<string, { cols: number; rows: number; windowPx: { w: number; h: number }; profile: string }> | null>
+  /** Optional: tabs the user named, by position; null when the terminal is not running. */
+  tabTitles?(): Promise<Array<{ windowIndex: number; tabIndex: number; title: string }> | null>
+  /** Optional: name the tabs holding these panes (restore). Returns the panes it could not name. */
+  setTabTitles?(titles: Array<{ paneId: string; title: string }>): Promise<string[]>
 }
 
 /** Agent kinds are registry ids (src/core/agents.ts): the built-ins below,

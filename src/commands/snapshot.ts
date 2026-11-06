@@ -55,14 +55,14 @@ async function takeSnapshot(notifyRestart: boolean): Promise<number | null> {
   if (!instance) return null // never launch iTerm2 just to look at it
   const state = await captureState(detectBackend())
   if (!state || (await terminalInstance()) !== instance) return null
-  const { agents, layout } = state
+  const { agents, layout, tabs } = state
   const path = snapshotFile()
   const store = loadStore(path)
   if (notifyRestart && isNewInstance(store, instance)) {
     const n = agentsToRestore(store, instance, await liveAgents())
     if (n > 0) await notify(`${n} agent${n === 1 ? ' was' : 's were'} open before iTerm restarted. Run: termbus restore`)
   }
-  saveStore(path, recordGeneration(store, { instance, agents, layout, now: Date.now() }))
+  saveStore(path, recordGeneration(store, { instance, agents, layout, tabs, now: Date.now() }))
   return agents.length
 }
 
